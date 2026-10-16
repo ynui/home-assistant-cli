@@ -1,0 +1,9 @@
+# make build output
+/bin/
+
+# a binary from a bare `go build ./...` run in the repo root
+/home-assistant-cli
+/has
+
+# macOS
+.DS_Store

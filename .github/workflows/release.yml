@@ -1,0 +1,114 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: darwin-arm64, os: macos-latest, goos: darwin, goarch: arm64 }
+          - { name: darwin-amd64, os: macos-latest, goos: darwin, goarch: amd64 }
+          - { name: linux-amd64, os: ubuntu-latest, goos: linux, goarch: amd64 }
+          - { name: linux-arm64, os: ubuntu-latest, goos: linux, goarch: arm64 }
+          - { name: windows-amd64, os: ubuntu-latest, goos: windows, goarch: amd64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          EXT: ${{ matrix.goos == 'windows' && '.exe' || '' }}
+        run: |
+          CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -ldflags="-s -w" \
+            -o "home-assistant-cli-$VERSION-${{ matrix.name }}$EXT" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: home-assistant-cli-$VERSION-${{ matrix.name }}*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Package
+        run: |
+          for dir in dist/*/; do
+            file=$(basename "$(ls "$dir")")
+            arch=$(sed -E 's/^home-assistant-cli-v[0-9.]+-(darwin|linux|windows)-(arm64|amd64)(\.exe)?$/\1-\2/' <<<"$file")
+            if [[ $file == *.exe ]]; then
+              zip -q "home-assistant-cli-$VERSION-$arch.zip" -j "$dir/$file"
+            else
+              tar -czf "home-assistant-cli-$VERSION-$arch.tar.gz" -C "$dir" "$file"
+            fi
+          done
+          ls -l home-assistant-cli-$VERSION-*
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: home-assistant-cli-$VERSION-*
+
+      # Four archives means four urls and four checksums, which is past what a
+      # sed expression should be trusted with; the shape of the formula stays the
+      # one in the tap, only the version, urls and shas move.
+      - name: Bump Homebrew tap
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then echo "HOMEBREW_TAP_TOKEN not set; skipping tap bump"; exit 0; fi
+          git clone --depth 1 "https://x-access-token:$TOKEN@github.com/ynui/homebrew-tap.git" tap
+          cd tap
+          python3 - "$VERSION" <<'PY'
+          import hashlib, pathlib, re, sys
+          ver = sys.argv[1].removeprefix("v")
+          base = "https://github.com/ynui/home-assistant-cli/releases/download"
+          shas = {}
+          for f in pathlib.Path("../dist").glob("home-assistant-cli-*.tar.gz"):
+              m = re.fullmatch(r"home-assistant-cli-v[\d.]+-(darwin|linux)-(arm64|amd64)\.tar\.gz", f.name)
+              shas[f"{m[1]}-{m[2]}"] = hashlib.sha256(f.read_bytes()).hexdigest()
+          path = pathlib.Path("Formula/home-assistant-cli.rb")
+          arch, out = None, []
+          for line in path.read_text().splitlines():
+              if ".tar.gz" in line:
+                  arch = re.search(r"(darwin|linux)-(arm64|amd64)\.tar\.gz", line).group(0)[:-7]
+                  pad = line[: len(line) - len(line.lstrip())]
+                  line = f'{pad}url "{base}/v{ver}/home-assistant-cli-v{ver}-{arch}.tar.gz"'
+              elif line.strip().startswith("sha256"):
+                  pad = line[: len(line) - len(line.lstrip())]
+                  line = f'{pad}sha256 "{shas[arch]}"'
+              elif line.startswith("  version"):
+                  line = f'  version "{ver}"'
+              out.append(line)
+          path.write_text("\n".join(out) + "\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet; then
+            git commit -am "home-assistant-cli $VERSION"
+            git push
+          else
+            echo "Tap formula already up to date"
+          fi
