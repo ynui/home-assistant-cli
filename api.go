@@ -128,7 +128,11 @@ func newAPIError(status int, raw []byte) error {
 		Message string `json:"message"`
 	}
 	if status == http.StatusUnauthorized {
-		return errors.New("token rejected (401); run `has login` to enter a new one")
+		// coded so main can give the 401 its own exit code without the
+		// message changing. ws.go has errBadToken for the same condition on
+		// the socket path; that one is shaped for the TUI's status line, so
+		// the two stay separate.
+		return coded{exitAuth, errors.New("token rejected (401); run `has login` to enter a new one")}
 	}
 	if json.Unmarshal(raw, &e) == nil && e.Message != "" {
 		return errors.New(e.Message)

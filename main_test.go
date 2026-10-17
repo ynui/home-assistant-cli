@@ -3,13 +3,19 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -663,6 +669,153 @@ func TestCallResolvesEntityID(t *testing.T) {
 	if !strings.Contains(posted, `"entity_id":"phone"`) {
 		t.Errorf("an unresolvable entity_id should be passed through: %q", posted)
 	}
+}
+
+// --dry-run answers "what would this touch" without touching it, which is the
+// only way to find out before finding out. The ids it prints come from the
+// selector resolution, so it has to run that resolution and then stop.
+func TestCallDryRun(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/states" {
+			io.WriteString(w, `[
+				{"entity_id":"light.kitchen_light","state":"off","attributes":{"friendly_name":"Kitchen Light"}},
+				{"entity_id":"light.kitchen_light_2","state":"off","attributes":{"friendly_name":"Kitchen Light 2"}}]`)
+			return
+		}
+		if r.Method == http.MethodPost {
+			posts++
+		}
+		io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"url":"`+srv.URL+`","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HAS_CONFIG", cfg)
+
+	out := captureStdout(t, func() {
+		if err := cmdCall([]string{"kitchen", "--all", "--dry-run"}, "on", "homeassistant", "turn_on"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if posts != 0 {
+		t.Errorf("a dry run must not call the server, got %d posts", posts)
+	}
+	if want := "light.kitchen_light,light.kitchen_light_2"; !strings.Contains(out, want) {
+		t.Errorf("a dry run should print the ids the selector resolved: %q", out)
+	}
+	if !strings.Contains(out, "homeassistant.turn_on") {
+		t.Errorf("a dry run should name the service: %q", out)
+	}
+}
+
+// list --brief is the shape to ask for when the attributes are not the question:
+// on a real instance they are half the payload, and every row carries two
+// timestamps nobody asked for.
+func TestListBrief(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `[{"entity_id":"light.kitchen_light","state":"on",
+			"attributes":{"friendly_name":"Kitchen Light","supported_features":42},
+			"last_changed":"2026-10-09T18:09:00.123456Z","last_updated":"2026-10-09T18:09:00.123456Z"}]`)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"url":"`+srv.URL+`","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HAS_CONFIG", cfg)
+	t.Cleanup(func() { *flagOutput = "table" })
+	*flagOutput = "json"
+
+	out := captureStdout(t, func() {
+		if err := cmdList([]string{"--brief"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	// Unmarshalled into maps, not into briefState: decoding into the type under
+	// test would pass even with the json tags wrong.
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("brief output is not json: %v\n%s", err, out)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows, want 1: %s", len(rows), out)
+	}
+	row := rows[0]
+	want := map[string]any{
+		"entity_id": "light.kitchen_light",
+		"name":      "Kitchen Light",
+		"state":     "on",
+	}
+	if len(row) != len(want) {
+		t.Errorf("brief row has keys %v, want exactly %v", row, want)
+	}
+	for k, v := range want {
+		if row[k] != v {
+			t.Errorf("brief row[%q] = %v, want %v", k, row[k], v)
+		}
+	}
+}
+
+// Every failure used to exit 1, so a script could not tell a mistyped selector
+// from a dead server from a dead token without reading the message.
+func TestExitCodes(t *testing.T) {
+	t.Run("classified", func(t *testing.T) {
+		cases := []struct {
+			name string
+			err  error
+			want int
+		}{
+			{"success", nil, 0},
+			{"plain", errors.New("boom"), exitError},
+			{"usage", coded{exitUsage, errors.New("bad --sort")}, exitUsage},
+			{"selector", coded{exitSelector, errors.New("no entity matches")}, exitSelector},
+			{"auth", coded{exitAuth, errors.New("token rejected")}, exitAuth},
+			{"network", &url.Error{Op: "GET", URL: "http://ha/api/states", Err: syscall.ECONNREFUSED}, exitNetwork},
+			{"timeout", context.DeadlineExceeded, exitNetwork},
+			// Client.do wraps everything on its way out, so the code has to
+			// survive one wrap - this is the shape a real failure arrives in.
+			{"wrapped", fmt.Errorf("GET /api/states: %w",
+				coded{exitSelector, errors.New("no entity matches")}), exitSelector},
+		}
+		for _, c := range cases {
+			if got := exitCode(c.err); got != c.want {
+				t.Errorf("%s: exitCode = %d, want %d", c.name, got, c.want)
+			}
+		}
+	})
+
+	// And end to end, so the wiring from a real command is covered too.
+	t.Run("from a command", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `[
+				{"entity_id":"light.kitchen_light","state":"on"},
+				{"entity_id":"light.kitchen_light_2","state":"on"}]`)
+		}))
+		t.Cleanup(srv.Close)
+		dir := t.TempDir()
+		cfg := filepath.Join(dir, "config.json")
+		if err := os.WriteFile(cfg, []byte(`{"url":"`+srv.URL+`","token":"t"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HAS_CONFIG", cfg)
+
+		if err := cmdList([]string{"zzzznope"}); exitCode(err) != exitSelector {
+			t.Errorf("a selector that matches nothing should exit %d, got %v (%d)",
+				exitSelector, err, exitCode(err))
+		}
+		if err := cmdList([]string{"--sort", "bogus"}); exitCode(err) != exitUsage {
+			t.Errorf("a bad flag value should exit %d, got %v (%d)",
+				exitUsage, err, exitCode(err))
+		}
+	})
 }
 
 // `has areas kitchen` has to work on a house with no entity called kitchen: the

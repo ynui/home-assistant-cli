@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -43,11 +46,15 @@ A selector is an entity id (light.kitchen), a domain (light, or lights), or a
 fuzzy name (kitchen). Reads accept many matches; writes need --all when a
 selector is not a single exact entity id.
 
-list flags: --sort entity|name|state|changed|updated, --reverse, --limit N.
-on/off/toggle flag: --all.
+list flags: --sort entity|name|state|changed|updated, --reverse, --limit N,
+  --brief (with -o json, entity_id, name and state only).
+on/off/toggle/call flags: --all, --dry-run (resolve and print, without calling).
 logbook flags: --day today|yesterday|YYYY-MM-DD, --limit N.
 watch and template print their own output: a stream of changes, and whatever the
 template rendered.
+
+exit codes: 1 error, 2 bad command line, 3 a selector matched nothing or too
+much, 4 the token was refused, 5 the server could not be reached.
 
 config lives in ~/.config/has/config.json. HAS_URL, HAS_TOKEN and HAS_CONFIG
 override it; --url and --token override those.
@@ -60,7 +67,7 @@ func main() {
 	args := flag.Args()
 	if len(args) == 0 {
 		flag.Usage()
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 
 	cmd, rest := args[0], args[1:]
@@ -102,7 +109,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		flag.Usage()
-		os.Exit(2)
+		os.Exit(exitUsage)
 	}
 	if err != nil {
 		fatal(err)
@@ -111,7 +118,47 @@ func main() {
 
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "has: "+err.Error())
-	os.Exit(1)
+	os.Exit(exitCode(err))
+}
+
+// Exit codes, so a script can tell one failure from another without reading the
+// message. Everything non-zero stays non-zero, so `if has list kitchen; then`
+// behaves as before; what changes is that the reason is machine-readable.
+const (
+	exitError    = 1 // something went wrong, the message says what
+	exitUsage    = 2 // the command line was wrong
+	exitSelector = 3 // a selector matched nothing, or matched more than one
+	exitAuth     = 4 // the token was refused; `has login` is the only fix
+	exitNetwork  = 5 // the server could not be reached
+)
+
+// coded is an error that knows which exit code it should produce. Wrapping this
+// way rather than tagging the message keeps two promises at once: a script can
+// tell one failure from another, and every message a user reads is byte for byte
+// what it was before the codes existed.
+type coded struct {
+	code int
+	err  error
+}
+
+func (e coded) Error() string { return e.err.Error() }
+func (e coded) Unwrap() error { return e.err }
+
+// exitCode maps an error to the code it should exit with. errors.As unwraps, so
+// it still finds the code after Client.do has wrapped the error on the way out
+// of an HTTP call.
+func exitCode(err error) int {
+	var c coded
+	var unreachable *url.Error
+	switch {
+	case err == nil:
+		return 0
+	case errors.As(err, &c):
+		return c.code
+	case errors.As(err, &unreachable), errors.Is(err, context.DeadlineExceeded):
+		return exitNetwork
+	}
+	return exitError
 }
 
 // newFlagSet gives each subcommand its own parser carrying the global flags,
@@ -137,7 +184,7 @@ func newFlagSet(name string) *flag.FlagSet {
 // function so a test can call it without newFlagSet's fatal on failure.
 func checkOutputFormat() error {
 	if *flagOutput != "table" && *flagOutput != "json" {
-		return fmt.Errorf("bad -o %q: want table or json", *flagOutput)
+		return coded{exitUsage, fmt.Errorf("bad -o %q: want table or json", *flagOutput)}
 	}
 	return nil
 }

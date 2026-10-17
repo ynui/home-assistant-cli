@@ -31,7 +31,7 @@ func resolve(states []State, tokens []string, all bool) ([]State, error) {
 		matches := match(states, tok)
 		switch {
 		case len(matches) == 0:
-			return nil, fmt.Errorf("no entity matches %q; run `has list` to see everything, or `has groups` for the domains", tok)
+			return nil, coded{exitSelector, fmt.Errorf("no entity matches %q; run `has list` to see everything, or `has groups` for the domains", tok)}
 		case len(matches) > 1 && !all:
 			return nil, tooMany(tok, matches, isGroup(states, tok))
 		}
@@ -49,10 +49,10 @@ func resolve(states []State, tokens []string, all bool) ([]State, error) {
 // choose from without flooding the terminal.
 func tooMany(tok string, matches []State, group bool) error {
 	if group {
-		return fmt.Errorf("%q is a group of %d entities; add --all to act on all of them", tok, len(matches))
+		return coded{exitSelector, fmt.Errorf("%q is a group of %d entities; add --all to act on all of them", tok, len(matches))}
 	}
-	return fmt.Errorf("%q matches %d entities:\n%s\nname one exactly, or add --all",
-		tok, len(matches), candidates(matches))
+	return coded{exitSelector, fmt.Errorf("%q matches %d entities:\n%s\nname one exactly, or add --all",
+		tok, len(matches), candidates(matches))}
 }
 
 // candidates lists entity ids, capped so a broad name cannot flood the output.

@@ -107,6 +107,7 @@ func cmdList(args []string) error {
 	sortBy := fs.String("sort", "entity", "sort by: entity, name, state, changed, updated")
 	reverse := fs.Bool("reverse", false, "reverse the sort order")
 	limit := fs.Int("limit", 0, "show at most this many entities, 0 for all")
+	brief := fs.Bool("brief", false, "with -o json, emit only entity_id, name and state (the table's columns)")
 	tokens, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -146,6 +147,9 @@ func cmdList(args []string) error {
 	}
 
 	if *flagOutput == "json" {
+		if *brief {
+			return emitJSON(briefStates(matched))
+		}
 		return emitJSON(matched)
 	}
 	// Show the timestamp that was actually sorted on, so the column and the
@@ -178,6 +182,29 @@ func cmdList(args []string) error {
 		[]string{"ENTITY", "NAME", "STATE", col},
 		[]int{50, 28, 24, len(timeFormat)},
 		rows)
+}
+
+// briefState is what `list --brief -o json` emits: the three columns the table
+// already shows, and nothing else.
+//
+// The full state is mostly things a reader did not ask for — attributes are
+// half the payload on a real instance, and every row carries two ISO
+// timestamps that differ by microseconds. `list -o json` keeps them because
+// "everything the server said" is a fair thing to want; this is the shape for
+// asking "which lights are on".
+type briefState struct {
+	EntityID string `json:"entity_id"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+}
+
+// briefStates projects states onto briefState, keeping the order they arrive in.
+func briefStates(states []State) []briefState {
+	out := make([]briefState, 0, len(states))
+	for _, s := range states {
+		out = append(out, briefState{s.EntityID, friendlyName(s), s.State})
+	}
+	return out
 }
 
 // withGroupHeaders inserts a "domain (n)" line wherever the domain changes.
@@ -231,7 +258,7 @@ func cmdGet(args []string) error {
 		return err
 	}
 	if len(tokens) == 0 {
-		return errors.New("usage: has get <entity>")
+		return coded{exitUsage, errors.New("usage: has get <entity>")}
 	}
 	c, err := configured()
 	if err != nil {
@@ -274,7 +301,7 @@ func stateSort(key string) (func(a, b State) bool, error) {
 	case "updated":
 		return func(a, b State) bool { return a.LastUpdated.Before(b.LastUpdated) }, nil
 	default:
-		return nil, fmt.Errorf("bad --sort %q: want entity, name, state, changed or updated", key)
+		return nil, coded{exitUsage, fmt.Errorf("bad --sort %q: want entity, name, state, changed or updated", key)}
 	}
 }
 
@@ -313,6 +340,7 @@ func matchAll(fields, patterns []string) bool {
 func cmdCall(args []string, name, dom, service string) error {
 	fs := newFlagSet(name)
 	all := fs.Bool("all", false, "act on every entity a group or fuzzy name matches")
+	dry := fs.Bool("dry-run", false, "resolve and print what would be called, without calling it")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -325,11 +353,11 @@ func cmdCall(args []string, name, dom, service string) error {
 	var data map[string]any
 	if name == "call" {
 		if len(rest) == 0 {
-			return errors.New("usage: has call <domain.service> [key=value ...]")
+			return coded{exitUsage, errors.New("usage: has call <domain.service> [key=value ...]")}
 		}
 		d, s, ok := strings.Cut(rest[0], ".")
 		if !ok || d == "" || s == "" {
-			return fmt.Errorf("expected domain.service, got %q", rest[0])
+			return coded{exitUsage, fmt.Errorf("expected domain.service, got %q", rest[0])}
 		}
 		dom, service = d, s
 		data, err = parseFields(rest[1:])
@@ -342,7 +370,7 @@ func cmdCall(args []string, name, dom, service string) error {
 		}
 	} else {
 		if len(rest) == 0 {
-			return fmt.Errorf("usage: has %s <entity...>", name)
+			return coded{exitUsage, fmt.Errorf("usage: has %s <entity...>", name)}
 		}
 		states, err := c.states()
 		if err != nil {
@@ -358,6 +386,13 @@ func cmdCall(args []string, name, dom, service string) error {
 			fmt.Fprintf(os.Stderr, "%s will act on %d entities\n", name, len(matched))
 		}
 		data = map[string]any{"entity_id": entityIDs(matched)}
+	}
+
+	// Everything above resolves; nothing below has fired. A dry run stops here,
+	// so it costs no extra request and still reports the ids the selector
+	// actually matched, which is the question it exists to answer.
+	if *dry {
+		return reportDryRun(dom, service, data)
 	}
 
 	changed, err := c.call(dom, service, data)
@@ -381,11 +416,45 @@ func cmdCall(args []string, name, dom, service string) error {
 	return nil
 }
 
+// reportDryRun prints the service and the payload it would be sent, without
+// calling anything. The payload is printed as it stands rather than assuming
+// its values are entity ids: entity_id is not always an entity id, and the
+// resolved value is the honest answer.
+func reportDryRun(dom, service string, data map[string]any) error {
+	full := dom + "." + service
+	if *flagOutput == "json" {
+		return emitJSON(map[string]any{"service": full, "data": data})
+	}
+	keys := make([]string, 0, len(data))
+	for k := range data {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Printf("would call %s\n", full)
+	for _, k := range keys {
+		fmt.Printf("  %s: %s\n", k, payloadValue(data[k]))
+	}
+	return nil
+}
+
+// payloadValue renders one payload value: the string a key=value argument
+// produced, or the comma-joined ids a selector resolved to — which is the form
+// that can be pasted straight back into another call.
+func payloadValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case []string:
+		return strings.Join(t, ",")
+	}
+	return fmt.Sprint(v)
+}
+
 // parseSince accepts the Go duration units plus d and w, because "7d" is what
 // people actually type and time.ParseDuration rejects it.
 func parseSince(s string) (time.Duration, error) {
 	bad := func() error {
-		return fmt.Errorf("bad --since %q: want something like 30m, 12h or 7d", s)
+		return coded{exitUsage, fmt.Errorf("bad --since %q: want something like 30m, 12h or 7d", s)}
 	}
 	if strings.HasSuffix(s, "d") {
 		if n, err := strconv.Atoi(strings.TrimSuffix(s, "d")); err == nil && n > 0 {
@@ -402,7 +471,7 @@ func parseSince(s string) (time.Duration, error) {
 		return 0, bad()
 	}
 	if d <= 0 {
-		return 0, fmt.Errorf("--since must be positive, got %q", s)
+		return 0, coded{exitUsage, fmt.Errorf("--since must be positive, got %q", s)}
 	}
 	return d, nil
 }
@@ -414,7 +483,7 @@ func parseFields(args []string) (map[string]any, error) {
 	for _, a := range args {
 		k, v, ok := strings.Cut(a, "=")
 		if !ok || k == "" {
-			return nil, fmt.Errorf("expected key=value, got %q", a)
+			return nil, coded{exitUsage, fmt.Errorf("expected key=value, got %q", a)}
 		}
 		out[k] = v
 	}
@@ -432,7 +501,7 @@ func cmdHistory(args []string) error {
 		return err
 	}
 	if len(rest) == 0 {
-		return errors.New("usage: has history <entity...> [--since 24h]")
+		return coded{exitUsage, errors.New("usage: has history <entity...> [--since 24h]")}
 	}
 	d, err := parseSince(*since)
 	if err != nil {
@@ -866,7 +935,7 @@ func cmdTemplate(args []string) error {
 		tpl = string(b)
 	}
 	if strings.TrimSpace(tpl) == "" {
-		return errors.New("usage: has template '<jinja>'  (or pipe a template in on stdin)")
+		return coded{exitUsage, errors.New("usage: has template '<jinja>'  (or pipe a template in on stdin)")}
 	}
 	c, err := configured()
 	if err != nil {
