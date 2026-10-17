@@ -108,7 +108,7 @@ func matchFuzzy(states []State, tok string) []State {
 	var out []State
 	for _, s := range states {
 		if strings.Contains(strings.ToLower(s.EntityID), needle) ||
-			strings.Contains(strings.ToLower(friendlyName(s)), needle) {
+			strings.Contains(strings.ToLower(friendlyName(&s)), needle) {
 			out = append(out, s)
 		}
 	}

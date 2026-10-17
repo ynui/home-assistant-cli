@@ -96,7 +96,10 @@ func (c *Client) do(method, path string, body any) ([]byte, error) {
 		}
 		rdr = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.base+path, rdr)
+	// The program-wide ctx, so ^C stops a request in flight instead of leaving
+	// it to time out: --timeout is thirty seconds by default and nobody wants
+	// to wait for it after pressing ^C.
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
 		return nil, err
 	}

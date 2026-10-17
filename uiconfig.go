@@ -41,23 +41,23 @@ type uiConfig struct {
 // know that "areas" means AreaOrder, and no caller can drop the others: both copy
 // rather than construct, which is the rule that keeps a field added later from
 // going missing on the next write.
-func (c uiConfig) orderFor(view string) []string {
+func (c uiConfig) orderFor(view viewMode) []string {
 	switch view {
-	case "areas":
+	case viewAreas:
 		return c.AreaOrder
-	case "states":
+	case viewStates:
 		return c.StateOrder
 	default:
 		return c.GroupOrder
 	}
 }
 
-func (c uiConfig) withOrder(view string, order []string) uiConfig {
+func (c uiConfig) withOrder(view viewMode, order []string) uiConfig {
 	next := c
 	switch view {
-	case "areas":
+	case viewAreas:
 		next.AreaOrder = order
-	case "states":
+	case viewStates:
 		next.StateOrder = order
 	default:
 		next.GroupOrder = order

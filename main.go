@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -19,13 +20,27 @@ var (
 	flagToken   = flag.String("token", "", "override configured long-lived token")
 	flagOutput  = flag.String("o", "table", "output format: table or json")
 	flagTimeout = flag.Duration("timeout", 30*time.Second, "per-request timeout")
+	flagVersion = flag.Bool("v", false, "print version and exit")
+	// --version is the same flag with a longer name; the stdlib treats them as
+	// different names, so both have to be registered.
+	flagVersion2 = flag.Bool("version", false, "print version and exit")
 )
+
+// version is set at build time via -ldflags "-X main.version=v0.3.0".
+// Defaults to "dev" for local builds (go run, go build without ldflags).
+var version = "dev"
+
+// ctx is cancelled when the user presses ^C. One context for the whole
+// program, set up by main: an in-flight request stops now instead of waiting
+// out --timeout, and `has watch` leaves its read loop and exits cleanly.
+var ctx = context.Background()
 
 const usageText = `has - a small command-line client for Home Assistant
 
 usage: has [global flags] <command> [args]
 
 commands:
+  version                    print the version
   login                       connect to Home Assistant and save the config
   groups                      list entity domains, busiest first
   areas [selector...]         list areas and the entities in them
@@ -61,8 +76,16 @@ override it; --url and --token override those.
 `
 
 func main() {
+	stop := onInterrupt()
+	defer stop()
+
 	flag.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
 	flag.Parse()
+
+	if *flagVersion || *flagVersion2 {
+		fmt.Println(version)
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {
@@ -73,6 +96,9 @@ func main() {
 	cmd, rest := args[0], args[1:]
 	var err error
 	switch cmd {
+	case "version", "--version":
+		fmt.Println(version)
+		return
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
 		return
@@ -119,6 +145,14 @@ func main() {
 func fatal(err error) {
 	fmt.Fprintln(os.Stderr, "has: "+err.Error())
 	os.Exit(exitCode(err))
+}
+
+// onInterrupt makes ^C cancel ctx. It is assigned rather than shadowed, which
+// is why it is a function and not three lines in main.
+func onInterrupt() context.CancelFunc {
+	var stop context.CancelFunc
+	ctx, stop = signal.NotifyContext(ctx, os.Interrupt)
+	return stop
 }
 
 // Exit codes, so a script can tell one failure from another without reading the
@@ -192,37 +226,74 @@ func checkOutputFormat() error {
 // parseArgs splits args into flags and positionals before handing them to a
 // subcommand's FlagSet. The stdlib parser stops at the first positional, which
 // would silently ignore `has history light.x --since 5m`.
+//
+// It walks the list in order instead of splitting it once: each run of flags
+// goes to the FlagSet, each positional is kept where it was written, and the
+// two come back interleaved. The order matters - `has call` reads rest[0] as the
+// service to call - and it used not to survive a bool flag, which pulled the
+// following positional into the flag list and pushed it to the front.
+//
+// `--` still ends flag parsing: everything after it is positional.
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
-	var flags, rest []string
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if a == "--" {
-			rest = append(rest, args[i+1:]...)
-			break
+	var rest []string
+	for {
+		n := endOfFlags(fs, args)
+		if err := fs.Parse(args[:n]); err != nil {
+			return nil, err
 		}
-		if len(a) > 1 && strings.HasPrefix(a, "-") {
-			flags = append(flags, a)
-			// Pull in the value for a flag written as `-flag value`.
-			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				i++
-				flags = append(flags, args[i])
+		switch {
+		case n == len(args): // flags only from here on
+			if err := checkOutputFormat(); err != nil {
+				return nil, err
 			}
-			continue
+			return append(fs.Args(), rest...), nil
+		case args[n] == "--":
+			return append(fs.Args(), append(rest, args[n+1:]...)...), nil
 		}
-		rest = append(rest, a)
+		rest = append(rest, args[n])
+		args = args[n+1:]
 	}
-	if err := fs.Parse(flags); err != nil {
-		return nil, err
-	}
-	if err := checkOutputFormat(); err != nil {
-		return nil, err
-	}
-	return append(fs.Args(), rest...), nil
 }
 
+// endOfFlags returns the index of the first argument that is not a flag: the
+// end of the list, a bare `--`, or anything not starting with a dash. A flag
+// written as `-flag value` counts its value too, so `-limit 5` is two
+// arguments rather than a flag and a positional.
+func endOfFlags(fs *flag.FlagSet, args []string) int {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || len(a) < 2 || a[0] != '-' {
+			return i
+		}
+		if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && takesValue(fs, a) {
+			i++
+		}
+	}
+	return len(args)
+}
+
+// takesValue reports whether a flag needs the next argument as its value. The
+// stdlib bool flags answer this themselves, and that is the whole point: a bool
+// does not, so swallowing whatever followed one put `entity_id=kitchen` in
+// front of the service name in `has call light.turn_on --all entity_id=kitchen`,
+// and dropped every flag written after it - the parse had already stopped.
+func takesValue(fs *flag.FlagSet, name string) bool {
+	f := fs.Lookup(strings.TrimLeft(name, "-"))
+	if f == nil {
+		return true // unknown flag: leave the complaint to Parse
+	}
+	b, ok := f.Value.(interface{ IsBoolFlag() bool })
+	return !ok || !b.IsBoolFlag()
+}
+
+// emitJSON writes one json document to stdout. HTML escaping is off because
+// every consumer of this output is jq or an agent, not a browser: an entity
+// called "Hall & Stairs" should come back as itself and not as "Hall \u0026
+// Stairs".
 func emitJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
 	return enc.Encode(v)
 }
 

@@ -90,6 +90,16 @@ type toggleMsg struct {
 	err    error
 }
 
+// statusKind colours the status line. Two values, so a bool would read worse at
+// the twenty-odd call sites than the name does - and a typo in a string literal
+// would colour an error as a success silently, which a named type cannot.
+type statusKind string
+
+const (
+	statusOK  statusKind = "ok"
+	statusErr statusKind = "err"
+)
+
 type uiModel struct {
 	client *Client
 	states []State
@@ -97,7 +107,7 @@ type uiModel struct {
 	filter string
 	cursor int
 	status string
-	kind   string // "ok" or "err", selects the status colour
+	kind   statusKind
 	// folded records explicit tab presses. A domain with no entry follows
 	// defaultFolded, so starting collapsed does not mean seeding 16 entries.
 	folded        map[string]bool
@@ -136,11 +146,6 @@ type uiModel struct {
 	wantWS   bool
 	polling  bool // re-reading the highlighted row, the fallback path
 	tries    int  // consecutive connect attempts, for the backoff
-
-	// rowTop and winStart are what View last drew, so a click can be mapped to
-	// a row without repeating the window arithmetic.
-	rowTop   int
-	winStart int
 
 	width int // terminal width, 0 before the first WindowSizeMsg
 }
@@ -184,11 +189,12 @@ func cmdUI(args []string) error {
 		// is not a preference, and a saved one made the list start at 387 rows.
 		defaultFolded: !*expand,
 	}
-	// The flag wins; an empty one means "use whatever ui.json remembers".
+	// The flag wins; an empty one means "use whatever ui.json remembers",
+	// normalised so an alias in the file still resolves.
 	if *view == "" && cfg.View != "" {
-		chosen = cfg.View
+		chosen, _ = parseView(cfg.View)
 	}
-	m.setView(chosen)
+	m.setView(string(chosen))
 	// Clicking a row beats typing a filter, but enabling the mouse takes it away
 	// from terminal text selection, so it stays opt-in.
 	if *mouse {
@@ -326,7 +332,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fetchMsg:
 		if msg.err != nil {
 			m.ready = true
-			m.setStatus(msg.err.Error(), "err")
+			m.setStatus(msg.err.Error(), statusErr)
 			return m, nil
 		}
 		first := !m.ready
@@ -345,13 +351,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Without the service list we cannot tell actionable from
 			// read-only. Show everything rather than nothing.
 			m.showAll = true
-			m.setStatus("could not read services, showing every entity: "+msg.err.Error(), "err")
+			m.setStatus("could not read services, showing every entity: "+msg.err.Error(), statusErr)
 			return m, nil
 		}
 		m.reg = newRegistry(msg.services)
 		if !m.reg.usable {
 			m.showAll = true
-			m.setStatus("server reported no service targets, showing every entity", "err")
+			m.setStatus("server reported no service targets, showing every entity", statusErr)
 			return m, nil
 		}
 		// A different action set means different rows; start over cleanly.
@@ -364,7 +370,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// entity under "unknown" and looks like a house with no areas at all.
 		// Say so, or nobody thinks to look.
 		if msg.err != nil {
-			m.setStatus("could not read areas, every entity shows as unknown: "+msg.err.Error(), "err")
+			m.setStatus("could not read areas, every entity shows as unknown: "+msg.err.Error(), statusErr)
 			return m, nil
 		}
 		if len(msg.areas) == 0 {
@@ -399,7 +405,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.closeWS()
 		// Subscribed. Stop re-reading the highlighted row: events now do it.
 		m.conn, m.polling, m.tries = msg.conn, false, 0
-		m.setStatus("live updates on", "ok")
+		m.setStatus("live updates on", statusOK)
 		// Events that happened while we were away were never delivered, so take
 		// a fresh full read rather than trusting the list we already had.
 		return m, tea.Batch(wsReadCmd(msg.conn), m.schedulePing(), fetchCmd(m.client))
@@ -440,17 +446,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = m.interval > 0
 		m.tries++
 		if m.wantWS && m.tries < wsConnectTries {
-			m.setStatus("live updates unavailable ("+msg.err.Error()+"), retrying", "err")
+			m.setStatus("live updates unavailable ("+msg.err.Error()+"), retrying", statusErr)
 			return m, tea.Batch(m.scheduleNext(), tea.Tick(m.backoff(),
 				func(time.Time) tea.Msg { return wsRetryMsg{} }))
 		}
 		m.wantWS = false
-		m.setStatus("live updates unavailable ("+msg.err.Error()+"), polling instead", "err")
+		m.setStatus("live updates unavailable ("+msg.err.Error()+"), polling instead", statusErr)
 		return m, nil
 
 	case wsRejectedMsg:
 		m.wantWS = false
-		m.setStatus(msg.err.Error()+" — run `has login`", "err")
+		m.setStatus(msg.err.Error()+" — run `has login`", statusErr)
 		return m, nil
 
 	case wsGoneMsg:
@@ -459,7 +465,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.closeWS()
 		m.polling = m.interval > 0
-		m.setStatus("live updates lost ("+msg.err.Error()+"), reconnecting", "err")
+		m.setStatus("live updates lost ("+msg.err.Error()+"), reconnecting", statusErr)
 		if !m.wantWS {
 			return m, m.scheduleNext()
 		}
@@ -472,14 +478,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toggleMsg:
 		if msg.err != nil {
-			m.setStatus(msg.err.Error(), "err")
+			m.setStatus(msg.err.Error(), statusErr)
 			return m, nil
 		}
 		if msg.state == nil {
-			m.setStatus(fmt.Sprintf("called on %s", msg.entity), "ok")
+			m.setStatus(fmt.Sprintf("called on %s", msg.entity), statusOK)
 			return m, nil
 		}
-		m.setStatus(fmt.Sprintf("%s → %s", msg.entity, msg.state.State), "ok")
+		m.setStatus(fmt.Sprintf("%s → %s", msg.entity, msg.state.State), statusOK)
 		m.patch(*msg.state)
 		return m, nil
 
@@ -490,6 +496,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleMouse(msg)
 	}
 	return m, nil
+}
+
+// runeKeys are the printable keys that do something outside a search. Each
+// entry returns its own command: `?` toggles an overlay and must not schedule a
+// hover re-read, while the other two move the cursor and must.
+//
+// The table is consulted only when m.searching is false, which is what keeps
+// every letter free as filter text: the guard lives in one place rather than
+// being repeated per entry, so a key added here cannot start eating somebody's
+// query.
+var runeKeys = map[rune]func(*uiModel) tea.Cmd{
+	'f': func(m *uiModel) tea.Cmd { m.toggleFavorite(); return m.afterMove() },
+	'v': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
+	'V': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
+	// It lands on top of the details panel rather than beside it, so that one
+	// goes away - and going back to it is one ^D away.
+	'?': func(m *uiModel) tea.Cmd { m.help = !m.help; m.details = false; return nil },
 }
 
 // Actions deliberately avoid letters: the filter is typed with letters, so
@@ -507,24 +530,10 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	// Outside search mode `f` pins the highlighted entity to the favorites
-	// group. It is free now because typing only happens inside a search.
-	if !m.searching && len(msg.Runes) == 1 && msg.Runes[0] == 'f' {
-		m.toggleFavorite()
-		return m, m.afterMove()
-	}
-	// Outside search mode `v` cycles the grouping view (groups -> areas -> states -> flat).
-	if !m.searching && len(msg.Runes) == 1 && (msg.Runes[0] == 'v' || msg.Runes[0] == 'V') {
-		m.cycleViewAndSelect()
-		return m, m.afterMove()
-	}
-	// Outside search mode `?` toggles the keyboard shortcuts popup. It lands on
-	// top of the details panel rather than beside it, so that one goes away -
-	// and going back to it is one ^D away.
-	if !m.searching && len(msg.Runes) == 1 && msg.Runes[0] == '?' {
-		m.help = !m.help
-		m.details = false
-		return m, nil
+	if !m.searching && len(msg.Runes) == 1 {
+		if fn, ok := runeKeys[msg.Runes[0]]; ok {
+			return m, fn(m)
+		}
 	}
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -637,7 +646,7 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.showAll {
 			what = "all entities, including read-only ones"
 		}
-		m.setStatus("showing "+what, "ok")
+		m.setStatus("showing "+what, statusOK)
 		return m, m.afterMove()
 	case tea.KeyCtrlU:
 		m.filter = ""
@@ -645,7 +654,7 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resetCursor()
 		return m, m.afterMove()
 	case tea.KeyCtrlR:
-		m.setStatus("refreshing…", "ok")
+		m.setStatus("refreshing…", statusOK)
 		return m, tea.Batch(fetchCmd(m.client), areasCmd(m.client), m.afterMove())
 	case tea.KeyBackspace:
 		m.filter = dropLastRune(m.filter)
@@ -653,24 +662,29 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// "/" starts search mode; while searching, "/" (and every other printable)
-	// becomes filter text; while not, "/" is the single way into it.
-	if len(msg.Runes) == 1 {
-		r := msg.Runes[0]
-		if !m.searching && r == '/' {
-			m.searching = true
-			m.filter = ""
-			m.resetCursor()
-			return m, m.afterMove()
-		}
-		if !m.searching {
-			return m, nil
-		}
-		m.filter += string(r)
-		m.resetCursor()
-		return m, m.afterMove()
+	return m, m.searchKey(msg)
+}
+
+// searchKey is what a printable does outside the switches above: "/" opens the
+// search, every printable inside one is filter text, and outside one it does
+// nothing at all.
+func (m *uiModel) searchKey(msg tea.KeyMsg) tea.Cmd {
+	if len(msg.Runes) != 1 {
+		return nil
 	}
-	return m, nil
+	r := msg.Runes[0]
+	if !m.searching {
+		if r != '/' {
+			return nil
+		}
+		m.searching = true
+		m.filter = ""
+		m.resetCursor()
+		return m.afterMove()
+	}
+	m.filter += string(r)
+	m.resetCursor()
+	return m.afterMove()
 }
 
 // ---------------------------------------------------------------- sub-menu
@@ -747,19 +761,32 @@ func (m *uiModel) menuMove(d int) {
 	}
 }
 
+// viewMode is how entities are grouped in the list. One field holds it
+// (uiModel.view) and the constants keep the names in one place: currentView()
+// used to re-parse the string on every rows() call, which is once per entity
+// per frame.
+type viewMode string
+
+const (
+	viewGroups viewMode = "groups"
+	viewAreas  viewMode = "areas"
+	viewStates viewMode = "states"
+	viewFlat   viewMode = "flat"
+)
+
 // parseView maps a --view value, or a saved ui.json entry, onto one of the
 // four groupings. The aliases are what people actually type, so they are
 // accepted; anything else is an error rather than a quiet default.
-func parseView(s string) (string, error) {
+func parseView(s string) (viewMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "groups", "group", "domain", "domains", "default":
-		return "groups", nil
+		return viewGroups, nil
 	case "areas", "area":
-		return "areas", nil
+		return viewAreas, nil
 	case "states", "state", "status":
-		return "states", nil
+		return viewStates, nil
 	case "flat", "list", "none", "all", "ungrouped":
-		return "flat", nil
+		return viewFlat, nil
 	}
 	return "", fmt.Errorf("unknown view %q: choose groups, areas, states, or flat", s)
 }
@@ -787,14 +814,14 @@ func (m *uiModel) nudge(delta int) tea.Cmd {
 func (m *uiModel) nudgeFavorite(r row, delta int) tea.Cmd {
 	id := r.entity.EntityID
 	if r.domain != favoritesGroup || !m.cfg.isFavorite(id) {
-		m.setStatus("only favorites have an order of their own · f pins one", "ok")
+		m.setStatus("only favorites have an order of their own · f pins one", statusOK)
 		return nil
 	}
 	order := slices.Clone(m.cfg.Favorites)
 	i := slices.Index(order, id)
 	j := i + delta
 	if j < 0 || j >= len(order) {
-		m.setStatus(fmt.Sprintf("%s is already %s in favorites", friendlyName(r.entity), endWord(delta)), "ok")
+		m.setStatus(fmt.Sprintf("%s is already %s in favorites", friendlyName(&r.entity), endWord(delta)), statusOK)
 		return nil
 	}
 	order[i], order[j] = order[j], order[i]
@@ -803,10 +830,10 @@ func (m *uiModel) nudgeFavorite(r row, delta int) tea.Cmd {
 	next.Favorites = order
 	m.cfg = next
 	if err := saveUIConfig(m.cfg); err != nil {
-		m.setStatus("could not save ui.json: "+err.Error(), "err")
+		m.setStatus("could not save ui.json: "+err.Error(), statusErr)
 		return nil
 	}
-	m.setStatus(fmt.Sprintf("moved %s %s in favorites", friendlyName(r.entity), endWord(delta)), "ok")
+	m.setStatus(fmt.Sprintf("moved %s %s in favorites", friendlyName(&r.entity), endWord(delta)), statusOK)
 	// The favorite moved one place; the cursor stays on it.
 	m.follow(r)
 	return nil
@@ -832,7 +859,7 @@ func (m *uiModel) nudgeGroup(r row, delta int) tea.Cmd {
 	i := slices.Index(shown, r.domain)
 	j := i + delta
 	if i < 0 || j < 0 || j >= len(shown) {
-		m.setStatus(fmt.Sprintf("%s is already %s", r.domain, endWord(delta)), "ok")
+		m.setStatus(fmt.Sprintf("%s is already %s", r.domain, endWord(delta)), statusOK)
 		return nil
 	}
 	shown[i], shown[j] = shown[j], shown[i]
@@ -848,10 +875,10 @@ func (m *uiModel) nudgeGroup(r row, delta int) tea.Cmd {
 
 	m.cfg = m.cfg.withOrder(m.currentView(), order)
 	if err := saveUIConfig(m.cfg); err != nil {
-		m.setStatus("could not save ui.json: "+err.Error(), "err")
+		m.setStatus("could not save ui.json: "+err.Error(), statusErr)
 		return nil
 	}
-	m.setStatus(fmt.Sprintf("moved %s to %s", r.domain, endWord(delta)), "ok")
+	m.setStatus(fmt.Sprintf("moved %s to %s", r.domain, endWord(delta)), statusOK)
 	// The group moved, not the cursor: it used to reset to the first entity,
 	// which threw you to the top of the list on every reorder.
 	m.follow(r)
@@ -864,11 +891,6 @@ func endWord(delta int) string {
 	}
 	return "bottom"
 }
-
-// favoriteAction is the pseudo-service the sub-menu offers last: pinning an
-// entity is not a Home Assistant service, but it is something you do to it, so
-// it belongs beside the rest rather than behind a key of its own.
-const favoriteAction = "__favorite__"
 
 // favoritesGroup is the name of the group favorites are gathered into. It is not
 // a domain, an area or a state, which is why it is the one header marked with a
@@ -895,7 +917,7 @@ func (m *uiModel) actionsFor(i int) []action {
 	if m.cfg.isFavorite(r.entity.EntityID) {
 		label = "unfavorite"
 	}
-	acts = append(acts, action{service: favoriteAction, label: label, order: 1000})
+	acts = append(acts, action{label: label, order: 1000, local: true})
 	return acts
 }
 
@@ -903,11 +925,11 @@ func (m *uiModel) actionsFor(i int) []action {
 func (m *uiModel) runAction(n int) tea.Cmd {
 	r, ok := m.rowAt(m.cursor)
 	if !ok {
-		m.setStatus("nothing selected", "err")
+		m.setStatus("nothing selected", statusErr)
 		return nil
 	}
 	if r.isGroup {
-		m.setStatus(m.foldHint(r.domain), "ok")
+		m.setStatus(m.foldHint(r.domain), statusOK)
 		return nil
 	}
 	d := domain(r.entity.EntityID)
@@ -916,19 +938,19 @@ func (m *uiModel) runAction(n int) tea.Cmd {
 	// the primary registry action, because the favorite is appended last.
 	acts := m.actionsFor(m.cursor)
 	if len(acts) == 0 {
-		m.setStatus(fmt.Sprintf("nothing to do with %s", r.entity.EntityID), "err")
+		m.setStatus(fmt.Sprintf("nothing to do with %s", r.entity.EntityID), statusErr)
 		return nil
 	}
 	if n >= len(acts) {
-		m.setStatus(fmt.Sprintf("%s has %d actions, %d is not one", d, len(acts), n+1), "err")
+		m.setStatus(fmt.Sprintf("%s has %d actions, %d is not one", d, len(acts), n+1), statusErr)
 		return nil
 	}
 	a := acts[n]
-	if a.service == favoriteAction {
+	if a.local {
 		m.toggleFavorite()
 		return nil
 	}
-	m.setStatus(fmt.Sprintf("%s %s…", a.label, r.entity.EntityID), "ok")
+	m.setStatus(fmt.Sprintf("%s %s…", a.label, r.entity.EntityID), statusOK)
 	return actionCmd(m.client, r.entity.EntityID, d, a.service)
 }
 
@@ -937,20 +959,20 @@ func (m *uiModel) runAction(n int) tea.Cmd {
 func (m *uiModel) toggleFavorite() {
 	r, ok := m.rowAt(m.cursor)
 	if !ok || r.isGroup {
-		m.setStatus("nothing selected", "err")
+		m.setStatus("nothing selected", statusErr)
 		return
 	}
 	id := r.entity.EntityID
 	m.cfg = m.cfg.toggleFavorite(id)
 	if err := saveUIConfig(m.cfg); err != nil {
-		m.setStatus("could not save ui.json: "+err.Error(), "err")
+		m.setStatus("could not save ui.json: "+err.Error(), statusErr)
 		return
 	}
 	word := "unfavorited"
 	if m.cfg.isFavorite(id) {
 		word = "favorited"
 	}
-	m.setStatus(fmt.Sprintf("%s %s", word, id), "ok")
+	m.setStatus(fmt.Sprintf("%s %s", word, id), statusOK)
 	// Pinning adds a group and a row above everything else, and unpinning takes
 	// one away: the row under the cursor is not the row that was under it.
 	m.follow(r)
@@ -1049,7 +1071,7 @@ func (m *uiModel) setFolded(domain string, folded bool) {
 	m.folded[domain] = folded
 }
 
-func (m *uiModel) setStatus(s, kind string) { m.status, m.kind = s, kind }
+func (m *uiModel) setStatus(s string, kind statusKind) { m.status, m.kind = s, kind }
 
 // ---------------------------------------------------------------- the tree
 
@@ -1073,9 +1095,9 @@ func (m *uiModel) matched() []State {
 			}
 			var hay string
 			switch m.currentView() {
-			case "areas":
+			case viewAreas:
 				hay = m.areaName(s)
-			case "states":
+			case viewStates:
 				hay = s.State
 			}
 			if hay != "" && strings.Contains(strings.ToLower(hay), needle) {
@@ -1102,7 +1124,7 @@ func (m *uiModel) isFolded(d string) bool {
 	if v, ok := m.folded[d]; ok {
 		return v
 	}
-	if d == favoritesGroup || (d == "all" && m.currentView() == "flat") {
+	if d == favoritesGroup || (d == "all" && m.currentView() == viewFlat) {
 		return false // pinned group should be visible first; flat view starts open
 	}
 	return m.defaultFolded
@@ -1220,7 +1242,7 @@ func (m *uiModel) groupOrder(states []State) []string {
 		if ri, rj := rank(order, out[i]), rank(order, out[j]); ri != rj {
 			return ri < rj
 		}
-		if m.currentView() == "areas" {
+		if m.currentView() == viewAreas {
 			if (out[i] == "unknown") != (out[j] == "unknown") {
 				return out[j] == "unknown"
 			}
@@ -1238,14 +1260,14 @@ func (m *uiModel) groupOrder(states []State) []string {
 // groups by the entity's area, and "states" groups by the current state.
 func (m *uiModel) groupKey(s State) string {
 	switch m.currentView() {
-	case "areas":
+	case viewAreas:
 		return m.areaName(s)
-	case "states":
+	case viewStates:
 		if s.State == "" {
 			return "unknown"
 		}
 		return s.State
-	case "flat":
+	case viewFlat:
 		return "all"
 	}
 	return domain(s.EntityID)
@@ -1270,14 +1292,16 @@ func (m *uiModel) areaName(s State) string {
 	return "unknown"
 }
 
-// currentView is the grouping mode. One field holds it; parseView is applied on
-// the way in so a value set directly in a test is still understood.
-func (m *uiModel) currentView() string {
-	n, err := parseView(m.view)
-	if err != nil {
-		return "groups"
+// currentView is the grouping mode as one of the known values. The field is a
+// plain string so ui.json and a hand-written test can set it directly; anything
+// unrecognised falls back rather than being rejected, because only a hand-edited
+// file can produce one. One switch, and no re-parsing per entity.
+func (m *uiModel) currentView() viewMode {
+	switch viewMode(m.view) {
+	case viewAreas, viewStates, viewFlat:
+		return viewMode(m.view)
 	}
-	return n
+	return viewGroups
 }
 
 // setView switches the grouping mode. An unknown name falls back to "groups"
@@ -1286,21 +1310,21 @@ func (m *uiModel) currentView() string {
 func (m *uiModel) setView(v string) {
 	n, err := parseView(v)
 	if err != nil {
-		n = "groups"
+		n = viewGroups
 	}
-	m.view = n
+	m.view = string(n)
 }
 
 // cycleView moves to the next grouping mode.
 func (m *uiModel) cycleView() {
-	modes := []string{"groups", "areas", "states", "flat"}
+	modes := []viewMode{viewGroups, viewAreas, viewStates, viewFlat}
 	for i, md := range modes {
 		if md == m.currentView() {
-			m.setView(modes[(i+1)%len(modes)])
+			m.setView(string(modes[(i+1)%len(modes)]))
 			return
 		}
 	}
-	m.setView(modes[0])
+	m.setView(string(modes[0]))
 }
 
 // cycleViewAndSelect switches grouping and stays on the same entity: every
@@ -1308,10 +1332,10 @@ func (m *uiModel) cycleView() {
 func (m *uiModel) cycleViewAndSelect() {
 	was, _ := m.rowAt(m.cursor)
 	m.cycleView()
-	m.cfg.View = m.currentView()
+	m.cfg.View = string(m.currentView())
 	_ = saveUIConfig(m.cfg)
 	m.follow(was)
-	m.setStatus("view: "+m.currentView(), "ok")
+	m.setStatus("view: "+string(m.currentView()), statusOK)
 }
 
 func (m *uiModel) move(d int) {
@@ -1417,6 +1441,39 @@ func (m *uiModel) afterMove() tea.Cmd {
 	return m.hoverCmd()
 }
 
+// frame is where the scrolling list sits in the terminal for one draw: the
+// window into rows(), the screen line that window starts on, and the in-view
+// group indicator above it when the list is scrolled past its own group header.
+//
+// Every field is derived from the model rather than stored. View used to write
+// rowTop and winStart back into the model as a side effect and rowAtY read them
+// out again, which put one piece of arithmetic in two places and left a click
+// mapped to whatever the last View happened to have drawn.
+type frame struct {
+	start, end int    // the window into rows()
+	rowTop     int    // screen line, counting from 1, that start is drawn on
+	group      string // the in-view group indicator's name, "" when there is none
+}
+
+// frame computes the geometry of one draw from the list as View built it.
+func (m *uiModel) frame(rows []row) frame {
+	start, end := window(m.cursor, len(rows), m.listHeight())
+	f := frame{start: start, end: end, rowTop: 3} // top rule, header, rule
+	if m.showFilter() {
+		f.rowTop = 4 // ... and the filter input above them
+	}
+	// The title, filter and rule above are drawn outside the window, so they
+	// never scroll away. This keeps the *group* visible too, which the top rule
+	// does not: scrolled deep into a 132-row group there would otherwise be no
+	// indication of what you are looking at. The indicator takes one of the
+	// list's own lines, so the rows below it move down by one.
+	if start < len(rows) && !rows[start].isGroup {
+		f.rowTop++
+		f.group = rows[start].domain
+	}
+	return f
+}
+
 // ---------------------------------------------------------------- mouse
 
 // handleMouse selects a row on click and scrolls on the wheel. Only active with
@@ -1448,15 +1505,17 @@ func (m *uiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// rowAtY maps a screen line to a row, using the window View last drew. A
-// MouseMsg.Y counts from 1 and m.rowTop is a line index counting from 0, so the
-// first drawn row arrives as rowTop+1 - subtract one before indexing.
+// rowAtY maps a screen line to a row, using the window this model draws now.
+// A MouseMsg.Y counts from 1 while rowTop counts the lines above the list, so
+// the first drawn row arrives as rowTop+1 - subtract one before indexing.
 func (m *uiModel) rowAtY(y int) (int, bool) {
-	if y <= m.rowTop {
+	rows := m.rows()
+	f := m.frame(rows)
+	if y <= f.rowTop {
 		return 0, false
 	}
-	i := m.winStart + (y - m.rowTop - 1)
-	if i < 0 || i >= len(m.rows()) {
+	i := f.start + (y - f.rowTop - 1)
+	if i < 0 || i >= len(rows) {
 		return 0, false
 	}
 	return i, true
@@ -1608,26 +1667,17 @@ func (m *uiModel) View() string {
 		b.WriteString(styleDim.Render(msg) + "\n")
 	}
 
-	// Reserve the lines around the list for the status and help text.
-	listHeight := m.listHeight()
-	start, end := window(m.cursor, len(rows), listHeight)
-	m.winStart = start
-	m.rowTop = 3 // title, blank, rule
-	if m.showFilter() {
-		m.rowTop = 4 // title, blank, filter, rule
+	// Where the list sits in this frame. The frame carries the lines reserved
+	// around it too, so the scroll window and the click mapping cannot disagree
+	// about which rows are on screen.
+	f := m.frame(rows)
+
+	if f.group != "" {
+		b.WriteString("  " + styleGroup.Render("▾ "+truncate(f.group, max(8, m.termWidth()-26))) +
+			styleDim.Render(fmt.Sprintf("  (%d in view of %d)", f.end-f.start, rows[f.start].total)) + "\n")
 	}
 
-	// The title, filter and rule above are drawn outside the window, so they
-	// never scroll away. This keeps the *group* visible too, which the top
-	// rule does not: scrolled deep into a 132-row group there would otherwise
-	// be no indication of what you are looking at.
-	if start < len(rows) && !rows[start].isGroup {
-		m.rowTop++
-		b.WriteString("  " + styleGroup.Render("▾ "+truncate(rows[start].domain, max(8, m.termWidth()-26))) +
-			styleDim.Render(fmt.Sprintf("  (%d in view of %d)", end-start, rows[start].total)) + "\n")
-	}
-
-	for i := start; i < end; i++ {
+	for i := f.start; i < f.end; i++ {
 		b.WriteString(m.line(rows[i], i == m.cursor) + "\n")
 		if i == m.cursor {
 			for _, l := range m.panelLines() {
@@ -1635,14 +1685,14 @@ func (m *uiModel) View() string {
 			}
 		}
 	}
-	if end < len(rows) {
-		b.WriteString(styleDim.Render(fmt.Sprintf("  … %d more", len(rows)-end)) + "\n")
+	if f.end < len(rows) {
+		b.WriteString(styleDim.Render(fmt.Sprintf("  … %d more", len(rows)-f.end)) + "\n")
 	}
 
 	b.WriteString("  " + styleRule.Render(strings.Repeat("─", m.ruleWidth())) + "\n")
 	if m.status != "" {
 		st := styleOK
-		if m.kind == "err" {
+		if m.kind == statusErr {
 			st = styleErr
 		}
 		b.WriteString("  " + st.Render(m.clip(m.status, 2)) + "\n")
@@ -1808,7 +1858,7 @@ func (m *uiModel) line(r row, selected bool) string {
 	// stays empty and the id stands in the id column - exactly as `has list`
 	// renders it. Falling back to the id inside the name column put ids at two
 	// different indents and made light.workspace_light read like a name.
-	name, id := friendlyName(s), "  "+s.EntityID
+	name, id := friendlyName(&s), "  "+s.EntityID
 	if m.cfg.isFavorite(s.EntityID) {
 		name = "★ " + name
 	}
@@ -1863,10 +1913,11 @@ func (m *uiModel) menuLines() []string {
 			style = styleKey
 		}
 		key := strconv.Itoa(i + 1)
-		if a.service == favoriteAction {
-			name := fmt.Sprintf("(%s)", key)
+		if a.local {
+			// Nothing to call, so only the label and the digit: the service
+			// column would be a lie.
 			out = append(out, "     "+mark+style.Render(pad(a.label, 12))+"  "+
-				styleDim.Render(truncate(name, max(8, m.termWidth()-22))))
+				styleDim.Render(truncate("("+key+")", max(8, m.termWidth()-22))))
 			continue
 		}
 		name := fmt.Sprintf("%s  (%s)", a.service, key)

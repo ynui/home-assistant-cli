@@ -75,6 +75,11 @@ type action struct {
 	service string
 	label   string
 	order   int
+	// local marks the pin/unpin entry the sub-menu offers last. Pinning is
+	// something you do to an entity but not a service Home Assistant knows, so
+	// it used to travel as a sentinel string in service - a value from the same
+	// space as a real service name, told apart by matching it.
+	local bool
 }
 
 // registry maps an entity domain to the actions offered for it.
@@ -147,13 +152,3 @@ func (r registry) actions(d string) []action { return r.byDomain[d] }
 
 // controllable reports whether the domain has at least one action.
 func (r registry) controllable(d string) bool { return len(r.byDomain[d]) > 0 }
-
-// find returns the action with the given service name, or nil.
-func (r registry) find(d, service string) *action {
-	for i, a := range r.byDomain[d] {
-		if a.service == service {
-			return &r.byDomain[d][i]
-		}
-	}
-	return nil
-}

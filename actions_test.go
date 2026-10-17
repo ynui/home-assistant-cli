@@ -143,19 +143,21 @@ func TestRegistryNoTargetData(t *testing.T) {
 	}
 }
 
-func TestRegistryFindAndLabels(t *testing.T) {
+// Verb labels are what the sub-menu prints, and a verb with no label falls back
+// to its own name rather than to nothing.
+func TestRegistryLabels(t *testing.T) {
 	r := newRegistry([]Service{
-		{Domain: "light", Name: "toggle", Target: tgt("light")},
 		{Domain: "light", Name: "turn_on", Target: tgt("light")},
+		{Domain: "cover", Name: "open_cover", Target: tgt("cover")},
 	})
-	if a := r.find("light", "turn_on"); a == nil || a.label != "on" {
-		t.Errorf("find turn_on = %+v", a)
+	if got := labels(r.actions("light")); !equal(got, []string{"on"}) {
+		t.Errorf("turn_on should be labelled on, got %v", got)
 	}
-	if a := r.find("light", "lock"); a != nil {
-		t.Errorf("light has no lock action, got %+v", a)
+	if got := labels(r.actions("cover")); !equal(got, []string{"open"}) {
+		t.Errorf("open_cover should be labelled open, got %v", got)
 	}
-	if a := r.find("cover", "open_cover"); a != nil {
-		t.Errorf("unknown domain should return nil, got %+v", a)
+	if got := verbLabel("no_such_verb"); got != "no_such_verb" {
+		t.Errorf("an unlabelled verb should speak for itself, got %q", got)
 	}
 	// Duplicate declarations of the same service must not appear twice.
 	dup := newRegistry([]Service{
@@ -165,6 +167,14 @@ func TestRegistryFindAndLabels(t *testing.T) {
 	if got := names(dup.actions("light")); !equal(got, []string{"toggle"}) {
 		t.Errorf("duplicates leaked: %v", got)
 	}
+}
+
+func labels(acts []action) []string {
+	out := make([]string, 0, len(acts))
+	for _, a := range acts {
+		out = append(out, a.label)
+	}
+	return out
 }
 
 // The grouped /api/services payload must flatten correctly. This is the shape

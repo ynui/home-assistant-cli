@@ -15,9 +15,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to commits, not tags: this workflow builds and publishes the
+      # release binaries, and a tag can be moved after the fact.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
@@ -26,8 +28,20 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l .)"
 
-      - run: go vet ./...
+      - name: go vet
+        run: go vet ./...
 
-      - run: go test -race ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
 
-      - run: make build
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # -cover so the number is in the log: the read commands' tables were
+      # untested for a long time and nobody noticed, because nothing printed
+      # the coverage.
+      - name: go test
+        run: go test -race -cover ./...
+
+      - name: make build
+        run: make build

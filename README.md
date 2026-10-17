@@ -359,6 +359,35 @@ touching a real house. Test fixtures in `*_test.go` are copied from real Home
 Assistant responses for the same reason: a mock that disagrees with the server is
 worse than no mock.
 
+### Developing with `has` also installed by brew
+
+`make run` and `go run .` are all you need to work on this, and they touch
+nothing on your `PATH` — which is the point. `make install` is the only thing
+that can shadow a brew install, because it puts `home-assistant-cli` and a `has`
+symlink in `~/.local/bin`, and on most setups that directory comes before
+`/opt/homebrew/bin`. Install says so when it creates a second `has`:
+
+```sh
+$ make install
+installed /Users/you/.local/bin/home-assistant-cli (alias: has)
+note: 'has' also lives at /opt/homebrew/bin/has.
+      'has' runs /Users/you/.local/bin/has now.
+      'make uninstall' hands the name back.
+```
+
+So the loop is: work with `make run ARGS="ui"`, and keep the global `has` on
+whatever brew gave you.
+
+```sh
+make uninstall   # gives the name back to brew; safe to run twice
+brew update && brew upgrade home-assistant-cli   # brew caches the tap, so update first
+```
+
+If you do want the checkout on your `PATH` permanently, either `make install` and
+`make uninstall` around a work session, or leave `~/.local/bin` after homebrew in
+`PATH` — then brew keeps the `has` name and the dev build is reachable by full
+path.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

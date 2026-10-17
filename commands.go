@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,8 +64,10 @@ func login(url, token string) error {
 		return err
 	}
 	if err := c.ping(); err != nil {
-		// A bad token is the common case, so point at the fix.
-		if strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "401") {
+		// A bad token is the common case, so point at the fix. newAPIError
+		// already classified it as exitAuth; searching the message for "401"
+		// was a second, weaker way to ask the same question.
+		if exitCode(err) == exitAuth {
 			return fmt.Errorf("%s rejected the token: %w\n  generate a new one at <url>/profile, then run `has login`", url, err)
 		}
 		return fmt.Errorf("cannot use %s: %w", url, err)
@@ -133,7 +134,7 @@ func cmdList(args []string) error {
 	if err != nil {
 		return err
 	}
-	sort.SliceStable(matched, func(i, j int) bool { return by(matched[i], matched[j]) })
+	sort.SliceStable(matched, func(i, j int) bool { return by(&matched[i], &matched[j]) })
 	if *reverse {
 		for i, j := 0, len(matched)-1; i < j; i, j = i+1, j-1 {
 			matched[i], matched[j] = matched[j], matched[i]
@@ -170,7 +171,7 @@ func cmdList(args []string) error {
 		case "updated":
 			when = timestamp(s.LastUpdated)
 		}
-		rows = append(rows, []string{s.EntityID, friendlyName(s), s.State, when})
+		rows = append(rows, []string{s.EntityID, friendlyName(&s), s.State, when})
 	}
 
 	// Only under the default sort: grouping by domain under a time or text
@@ -202,7 +203,7 @@ type briefState struct {
 func briefStates(states []State) []briefState {
 	out := make([]briefState, 0, len(states))
 	for _, s := range states {
-		out = append(out, briefState{s.EntityID, friendlyName(s), s.State})
+		out = append(out, briefState{s.EntityID, friendlyName(&s), s.State})
 	}
 	return out
 }
@@ -284,28 +285,31 @@ func cmdGet(args []string) error {
 	return table(os.Stdout,
 		[]string{"ENTITY", "NAME", "STATE", "CHANGED"},
 		[]int{50, 28, 24, len(timeFormat)},
-		[][]string{{s.EntityID, friendlyName(s), s.State, timestamp(s.LastChanged)}})
+		[][]string{{s.EntityID, friendlyName(&s), s.State, timestamp(s.LastChanged)}})
 }
 
-// stateSort returns a "less" function for a --sort key.
-func stateSort(key string) (func(a, b State) bool, error) {
+// stateSort returns a "less" function for a --sort key. The comparators take
+// pointers: State is a hundred bytes and this runs once per comparison.
+func stateSort(key string) (func(a, b *State) bool, error) {
 	switch key {
 	case "entity":
-		return func(a, b State) bool { return a.EntityID < b.EntityID }, nil
+		return func(a, b *State) bool { return a.EntityID < b.EntityID }, nil
 	case "name":
-		return func(a, b State) bool { return friendlyName(a) < friendlyName(b) }, nil
+		return func(a, b *State) bool { return friendlyName(a) < friendlyName(b) }, nil
 	case "state":
-		return func(a, b State) bool { return a.State < b.State }, nil
+		return func(a, b *State) bool { return a.State < b.State }, nil
 	case "changed":
-		return func(a, b State) bool { return a.LastChanged.Before(b.LastChanged) }, nil
+		return func(a, b *State) bool { return a.LastChanged.Before(b.LastChanged) }, nil
 	case "updated":
-		return func(a, b State) bool { return a.LastUpdated.Before(b.LastUpdated) }, nil
+		return func(a, b *State) bool { return a.LastUpdated.Before(b.LastUpdated) }, nil
 	default:
 		return nil, coded{exitUsage, fmt.Errorf("bad --sort %q: want entity, name, state, changed or updated", key)}
 	}
 }
 
-func friendlyName(s State) string {
+// friendlyName takes a pointer: State is a hundred bytes with a map in it,
+// and this is called from sort comparators, once per comparison.
+func friendlyName(s *State) string {
 	if v, ok := s.Attributes["friendly_name"].(string); ok {
 		return v
 	}
@@ -590,7 +594,6 @@ func cmdWatch(args []string) error {
 	}
 	emit := watchPrinter(only)
 
-	ctx := context.Background()
 	for tries := 0; ; tries++ {
 		connected, err := wsStream(ctx, c, *flagTimeout, "", emit)
 		if err == nil || ctx.Err() != nil {

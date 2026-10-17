@@ -29,6 +29,20 @@ import (
 // favorites and group order with `{"view": "..."}` every time the suite ran.
 // Setting it once here means a test that forgets cannot reach the real file;
 // a test that cares sets HAS_CONFIG itself with t.Setenv.
+// The version is injected at build time and defaults to "dev" for a local
+// build; a release sets it with -ldflags. Both spellings of the flag have to be
+// registered, and both have to start false.
+func TestVersionFlag(t *testing.T) {
+	if *flagVersion || *flagVersion2 {
+		t.Error("the version flags should start false")
+	}
+	for _, name := range []string{"v", "version"} {
+		if flag.CommandLine.Lookup(name) == nil {
+			t.Errorf("-%s is not registered", name)
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "has-test-*")
 	if err != nil {
@@ -226,11 +240,11 @@ func TestSelfCheck(t *testing.T) {
 	})
 
 	t.Run("friendlyName", func(t *testing.T) {
-		if got := friendlyName(State{Attributes: map[string]any{"friendly_name": "Hall"}}); got != "Hall" {
+		if got := friendlyName(&State{Attributes: map[string]any{"friendly_name": "Hall"}}); got != "Hall" {
 			t.Errorf("got %q", got)
 		}
 		// Entities without the attribute must not render "(nil)".
-		if got := friendlyName(State{}); got != "" {
+		if got := friendlyName(&State{}); got != "" {
 			t.Errorf("got %q, want empty", got)
 		}
 	})
@@ -318,7 +332,7 @@ func TestSelfCheck(t *testing.T) {
 			if err != nil {
 				t.Fatalf("--sort %s: %v", tc.key, err)
 			}
-			if got := by(a, b); got != tc.aFirst {
+			if got := by(&a, &b); got != tc.aFirst {
 				t.Errorf("--sort %s: a before b = %v, want %v", tc.key, got, tc.aFirst)
 			}
 		}
@@ -547,18 +561,6 @@ func captureStdout(t *testing.T, f func()) string {
 	return string(b)
 }
 
-// testHTTP serves one canned body for any request, so a client method can be
-// exercised against the exact payload shape a real server returns.
-func testHTTP(t *testing.T, body []byte) *http.Client {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv.Client()
-}
-
 // testServer runs a server whose responses are driven by the path, so a
 // Client can be pointed at it.
 func testServer(t *testing.T, body string) *Client {
@@ -581,7 +583,56 @@ func testFlags() *flag.FlagSet {
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	fs.String("since", "24h", "")
 	fs.Int("limit", 50, "")
+	// A bool, because that is the flag that does not take a value and used to
+	// take the positional after it anyway.
+	fs.Bool("all", false, "")
 	return fs
+}
+
+// A bool flag does not take the next argument, so nothing may pull it in: doing
+// so moved `has call light.turn_on --all entity_id=kitchen`'s payload in front
+// of the service name, and silently dropped every flag written after it.
+func TestParseArgsBoolFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string // positionals, in the order they were written
+	}{
+		{"positional then bool", []string{"light.turn_on", "--all", "entity_id=kitchen"},
+			[]string{"light.turn_on", "entity_id=kitchen"}},
+		{"bool then positional", []string{"--all", "kitchen"}, []string{"kitchen"}},
+		{"bool between positionals", []string{"kitchen", "--all", "lamp"}, []string{"kitchen", "lamp"}},
+		{"flag after a swallowed one", []string{"kitchen", "--all", "--limit", "5"}, []string{"kitchen"}},
+		{"value is not a positional", []string{"-limit", "5", "kitchen"}, []string{"kitchen"}},
+		{"equals form", []string{"--since=5m", "kitchen"}, []string{"kitchen"}},
+		{"no positionals", []string{"--all", "-limit", "5"}, nil},
+	}
+	for _, c := range cases {
+		fs := testFlags()
+		got, err := parseArgs(fs, c.args)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: positionals = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The flags themselves still land, whatever side of a positional they were
+// written on - a dropped --all is a write refused for the wrong reason, and a
+// dropped --dry-run is a write that happened.
+func TestParseArgsFlagsStillApply(t *testing.T) {
+	fs := testFlags()
+	if _, err := parseArgs(fs, []string{"kitchen", "--all", "--limit", "5", "--since=1h"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"all": "true", "limit": "5", "since": "1h"} {
+		if got := fs.Lookup(name).Value.String(); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
 }
 
 // -o is validated in newFlagSet, so it is caught whichever side of the

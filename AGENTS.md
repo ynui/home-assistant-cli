@@ -9,16 +9,31 @@ Everything else is stdlib — keep it that way unless there is a real reason.
 ## Commands
 
 ```sh
-make            # fmt -> vet -> test -> build, in that order
+make            # fmt -> vet -> lint -> test -> build, in that order
+make lint       # staticcheck, as a module download: nothing to install
+make vuln       # govulncheck; needs the network, so it is not in `all`
 make build      # -> bin/home-assistant-cli   (never leave a binary in the repo root)
 make install    # -> ~/.local/bin, then verifies it is on PATH
+make uninstall  # removes exactly that, idempotently
 make run ARGS="list kitchen"
 make demo       # re-record demo/demo.gif with vhs, against demo/fakeha
 ```
 
+`make install` is the only target that can shadow a brew install: it puts the
+binary and a `has` symlink in `~/.local/bin`, which usually precedes
+`/opt/homebrew/bin`. It therefore warns when another `has` already exists on
+PATH, and `make uninstall` gives the name back. Developing needs neither — `make
+run` / `go run .` use the checkout and leave PATH alone — so a brew-installed
+`has` and a dev checkout can coexist, which is the recommended arrangement.
+`brew upgrade` needs `brew update` first: the tap clone is cached, so it will
+otherwise report nothing to upgrade and quietly leave you on the old version.
+
 Focused checks: `go test -run TestUISubMenu ./...`, `go test -run TestSelfCheck -v ./...`
 (one top-level test with `t.Run` subtests). No suite runner, no fixtures on
-disk. `TestSelfCheck` in `main_test.go` covers the non-TUI logic.
+disk. `TestSelfCheck` in `main_test.go` covers the non-TUI logic. The read
+commands' tables are pinned by `TestReadCommandOutput` in `output_test.go`, and
+`BenchmarkUIRows`/`BenchmarkUIView` answer "is the per-keystroke list rebuild
+worth caching?" with numbers rather than argument.
 
 **`TestMain` points `HAS_CONFIG` at a temp directory for the whole package, and
 that is load-bearing.** The UI writes `ui.json` when you pin, reorder or switch
@@ -122,6 +137,31 @@ live endpoint with curl before trusting a green test.
 mean pty capture returns mangled or stale frames; it cost several wasted
 debugging rounds. Every UI test drives `Update()`/`View()` directly and `t.Log`
 the rendered screen.
+
+**A bool flag never takes the next argument, and a positional keeps the order it
+was written in.** `parseArgs` pre-splits because the stdlib parser stops at the
+first positional, which would silently ignore `has history light.x --since 5m`.
+It used to pull the following token in as a flag's value whatever the flag was,
+so `has call light.turn_on --all entity_id=kitchen` read `entity_id=kitchen` as
+the service to call, and every flag written after it was dropped — the parse had
+already stopped. `endOfFlags`/`takesValue` ask the FlagSet whether a flag wants
+a value (stdlib bools answer `IsBoolFlag` themselves) and `parseArgs` re-runs
+`fs.Parse` on the remainder rather than splitting once. `TestParseArgsBoolFlags`
+and `TestParseArgsFlagsStillApply` pin both halves.
+
+**One context for the whole program, cancelled by ^C.** `Client.do`, the
+websocket handshake, the socket reads and `has watch` all hang off a package-level
+`ctx` that `signal.NotifyContext` cancels. It used to be `http.NewRequest` with
+no context and `context.Background()` in `watch`, so ^C left a request waiting out
+the thirty-second `--timeout` and killed a tail mid-line. Set it up in `main`
+(`onInterrupt`), never in a command.
+
+**The frame is derived, never stored.** `m.frame(rows)` computes the window, the
+screen line the list starts on and the in-view group indicator; `View` renders
+it and `rowAtY` reads it. `View` used to write `rowTop`/`winStart` back into the
+model as a side effect, and `chromeLines()` re-derived what it had written, with
+a comment admitting the two had to match. One copy of the arithmetic, and a click
+no longer depends on a `View` having happened first.
 
 ## Invariants worth preserving
 

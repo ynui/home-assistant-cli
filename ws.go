@@ -179,7 +179,9 @@ func wsConnect(c *Client, timeout time.Duration, eventType string) (*websocket.C
 		timeout = 30 * time.Second
 	}
 	// The context covers the handshake only; it is not the connection's lifetime.
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	// It hangs off the program-wide one, so ^C aborts a connect that is stuck
+	// rather than waiting out the timeout.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	conn, _, err := websocket.Dial(ctx, url, nil)
@@ -234,7 +236,7 @@ func wsConnect(c *Client, timeout time.Duration, eventType string) (*websocket.C
 // the socket is only read from where the rest of the program is decided.
 func wsReadCmd(conn *websocket.Conn) tea.Cmd {
 	return func() tea.Msg {
-		_, data, err := conn.Read(context.Background())
+		_, data, err := conn.Read(ctx)
 		if err != nil {
 			return wsGoneMsg{conn: conn, err: err}
 		}
@@ -254,7 +256,7 @@ func wsReadCmd(conn *websocket.Conn) tea.Cmd {
 // notice a connection that died without closing.
 func wsPingCmd(conn *websocket.Conn) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), wsPingTimeout)
+		ctx, cancel := context.WithTimeout(ctx, wsPingTimeout)
 		defer cancel()
 		if err := conn.Ping(ctx); err != nil {
 			return wsGoneMsg{conn: conn, err: err}

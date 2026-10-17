@@ -409,7 +409,7 @@ func TestUIMenuRunsTheFavoriteEntry(t *testing.T) {
 	t.Setenv("HAS_CONFIG", filepath.Join(t.TempDir(), "config.json"))
 
 	acts := m.actionsFor(m.cursor)
-	if len(acts) == 0 || acts[len(acts)-1].service != favoriteAction {
+	if len(acts) == 0 || !acts[len(acts)-1].local {
 		t.Fatalf("fixture drift: no trailing favorite entry in %v", acts)
 	}
 
@@ -699,24 +699,26 @@ func TestUINavigationKeys(t *testing.T) {
 
 	t.Run("click selects the row under the pointer", func(t *testing.T) {
 		m := uiFixture()
-		m.View() // draws the window, which is what the mapping is based on
-		// MouseMsg.Y counts from 1 and rowTop is a line index, so the first
-		// drawn row arrives as rowTop+1. Selecting row winStart+1 here is how
-		// every click landed a row below what was under the pointer.
+		// The mapping is derived from the model, not from the last View: a click
+		// no longer depends on a draw having happened first.
+		f := m.frame(m.rows())
+		// MouseMsg.Y counts from 1 and rowTop counts the lines above the list, so
+		// the first drawn row arrives as rowTop+1. Selecting row start+1 here is
+		// how every click landed a row below what was under the pointer.
 		click := func(y int) *uiModel {
 			return apply(m, tea.MouseMsg{
 				Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,
 				X: 2, Y: y,
 			})
 		}
-		if got := click(m.rowTop + 1); got.cursor != m.winStart {
-			t.Errorf("click on the first drawn row landed on %d, want %d", got.cursor, m.winStart)
+		if got := click(f.rowTop + 1); got.cursor != f.start {
+			t.Errorf("click on the first drawn row landed on %d, want %d", got.cursor, f.start)
 		}
-		if got := click(m.rowTop + 2); got.cursor != m.winStart+1 {
-			t.Errorf("click on the second drawn row landed on %d, want %d", got.cursor, m.winStart+1)
+		if got := click(f.rowTop + 2); got.cursor != f.start+1 {
+			t.Errorf("click on the second drawn row landed on %d, want %d", got.cursor, f.start+1)
 		}
 		// The wheel scrolls instead of selecting.
-		got := click(m.rowTop + 1)
+		got := click(f.rowTop + 1)
 		before := got.cursor
 		got = apply(got, tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
 		if got.cursor <= before {
@@ -922,8 +924,8 @@ func TestUITogglePatchesInPlace(t *testing.T) {
 		// The row's name comes from friendly_name, so a patch that dropped the
 		// attributes left a nameless row with the id pushed into the name
 		// column - and nothing re-read it until ^R on the polling path.
-		if friendlyName(s) != "Garage Light" {
-			t.Errorf("patch dropped the name, got %q", friendlyName(s))
+		if friendlyName(&s) != "Garage Light" {
+			t.Errorf("patch dropped the name, got %q", friendlyName(&s))
 		}
 	}
 	if !strings.Contains(got.status, "light.garage_light") {
@@ -949,8 +951,8 @@ func TestUIActionTakesTheEntityItActedOn(t *testing.T) {
 		t.Errorf("took the group's state instead of the member's: %s = %q",
 			msg.state.EntityID, msg.state.State)
 	}
-	if friendlyName(*msg.state) != "Kitchen Light" {
-		t.Errorf("the patch should carry the attributes, got name %q", friendlyName(*msg.state))
+	if friendlyName(msg.state) != "Kitchen Light" {
+		t.Errorf("the patch should carry the attributes, got name %q", friendlyName(msg.state))
 	}
 }
 
@@ -960,11 +962,11 @@ func TestUIPatchKeepsAttributes(t *testing.T) {
 	m := uiFixture()
 	m.patch(State{EntityID: "light.garage_light", State: "on"})
 	s := m.selected()
-	if friendlyName(s) != "" && friendlyName(s) != "Garage Light" {
-		t.Fatalf("fixture drift: name is %q", friendlyName(s))
+	if friendlyName(&s) != "" && friendlyName(&s) != "Garage Light" {
+		t.Fatalf("fixture drift: name is %q", friendlyName(&s))
 	}
 	for _, st := range m.states {
-		if st.EntityID == "light.garage_light" && friendlyName(st) == "" {
+		if st.EntityID == "light.garage_light" && friendlyName(&st) == "" {
 			t.Error("a bare patch blanked the name")
 		}
 	}
@@ -1040,7 +1042,7 @@ func TestUIViewFitsTerminal(t *testing.T) {
 			Attributes: map[string]any{"friendly_name": fmt.Sprintf("Bulk %02d", i)},
 		})
 	}
-	m.setStatus("light.kitchen_light → on", "ok")
+	m.setStatus("light.kitchen_light → on", statusOK)
 	m.cursor = 20 // deep enough that the group indicator and "… more" are drawn
 
 	fit := func(what string) {
@@ -1080,7 +1082,7 @@ func TestUIViewFitsTerminal(t *testing.T) {
 // is the difference between a short list and a missing one.
 func TestUIHeaderCountsEntities(t *testing.T) {
 	m := uiFixture() // 5 entities, one of them read-only
-	m.setStatus("", "ok")
+	m.setStatus("", statusOK)
 	m.defaultFolded = true
 
 	view := stripANSI(m.View())
@@ -1112,7 +1114,7 @@ func TestUIViewFitsTerminalWidth(t *testing.T) {
 			Attributes: map[string]any{"friendly_name": fmt.Sprintf("Bulk %02d", i)},
 		})
 	}
-	m.setStatus("light.kitchen_light → on", "ok")
+	m.setStatus("light.kitchen_light → on", statusOK)
 	m.cursor = 20
 
 	for _, width := range []int{80, 60, 40} {
@@ -1349,13 +1351,12 @@ func TestUIViewActionsInDifferentViews(t *testing.T) {
 	}
 	var foundToggle, foundTurnOn, foundFav bool
 	for _, a := range acts {
-		if a.service == "toggle" {
+		switch {
+		case a.service == "toggle":
 			foundToggle = true
-		}
-		if a.service == "turn_on" {
+		case a.service == "turn_on":
 			foundTurnOn = true
-		}
-		if a.service == "__favorite__" {
+		case a.local:
 			foundFav = true
 		}
 	}
