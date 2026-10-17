@@ -239,6 +239,24 @@ the rendered screen.
   print `entity → state` or `called domain.service` on stdout, so the result can
   be captured and piped. `--all`'s blast-radius notice and a service that
   changes nothing still speak on stderr.
+- **An exit code is the message a script gets instead of the message.** 1 error,
+  2 bad command line, 3 selector resolved to nothing or too much, 4 token
+  refused, 5 server unreachable. The code is carried by `coded`, which wraps the
+  error instead of tagging its text — `fmt.Errorf("%w…", errUsage)` prints the
+  sentinel's own message into the middle of the sentence, which is how the first
+  attempt came out as `has: usagebad --sort "bogus"`. A new failure that a script
+  could act on differently needs its own code, wrapped at the source; one that
+  cannot stays 1. Pinned by `TestExitCodes`.
+- **`list --brief` exists because attributes are half the payload.** `list -o
+  json` stays the whole server answer — that is a fair thing to want — but on a
+  387-entity house asking "which lights are on" costs ~30k tokens of
+  `supported_features` nobody read. `--brief` emits the table's three columns as
+  json and is 80% smaller. Pinned by `TestListBrief`.
+- **`--dry-run` resolves and then stops, and that order is the feature.** It sits
+  between the selector resolution and `c.call` in `cmdCall`, so it costs no extra
+  request and still reports the ids the selector really matched — `has list
+  kitchen` answers a different question. One insertion point covers on/off/toggle
+  and `call`. Pinned by `TestCallDryRun`, which counts POSTs.
 - **`has call` resolves `entity_id` / `entity_ids`.** Values go through
   `resolveTargets`, so the selector rules hold for service calls too; a value
   matching nothing is passed through untouched, because that key is not always

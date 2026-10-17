@@ -101,9 +101,9 @@ it is a bearer token that grants full control of your house). Re-run
 |---|---|
 | `has groups` | entity domains and counts, busiest first |
 | `has areas [selector…]` | areas and the entities in them, busiest first |
-| `has list [selector…]` | entity states as a table, `-o json` for full attributes |
+| `has list [selector…]` | entity states as a table, `-o json` for full attributes, `--brief` for the table's columns as json |
 | `has get <entity>` | exactly one entity |
-| `has on \| off \| toggle <selector…>` | act on entities; each one is confirmed with its new state |
+| `has on \| off \| toggle <selector…>` | act on entities; each one is confirmed with its new state, `--dry-run` to only say what it would do |
 | `has call <domain.service> [k=v…]` | any service, for anything the shortcuts miss |
 | `has history <entity…>` | recent state changes for the entities you name |
 | `has logbook [selector…]` | what happened today, house-wide or for a selector |
@@ -164,6 +164,51 @@ has: "kitchen" matches 2 entities:
   light.kitchen_light_2
 name one exactly, or add --all
 ```
+
+`--dry-run` resolves the selector and prints what would be called without
+calling it, which is the way to find out before finding out:
+
+```sh
+$ has on kitchen --all --dry-run
+on will act on 2 entities
+would call homeassistant.turn_on
+  entity_id: light.kitchen_light,light.kitchen_light_2
+```
+
+## Scripting and agents
+
+Every read takes `-o json`, and so do the writes — results go to stdout, warnings
+to stderr, so a pipe gets only the data. Start with `has groups`, which is a few
+hundred bytes of domain names and counts, before asking for anything expensive.
+
+`has list -o json` returns everything the server said, which on a large instance
+is mostly attributes nobody asked for. When the question is "which lights are on",
+`--brief` gives the three columns the table shows and nothing else:
+
+```sh
+$ has list light --brief -o json
+[{"entity_id":"light.kitchen_light","name":"Kitchen Light","state":"on"}]
+```
+
+Failures have distinct exit codes, so a script can tell them apart without
+reading the message:
+
+| code | meaning | what to do |
+|---|---|---|
+| 0 | fine | |
+| 1 | something went wrong | the message says what |
+| 2 | the command line was wrong | fix the invocation |
+| 3 | a selector matched nothing, or matched more than one | narrow it, or add `--all` |
+| 4 | the token was refused | `has login`; nothing else will work |
+| 5 | the server could not be reached | retry later |
+
+For anything with no endpoint, `has template` is the escape hatch — it renders
+server-side and prints the result verbatim, so a template that produces json
+produces json.
+
+Put the connection in `HAS_URL` and `HAS_TOKEN` rather than `--url`/`--token`, so
+the token stays out of the process list. `has ui` is for a person at a terminal
+and is no use to a script.
 
 ## The TUI
 
