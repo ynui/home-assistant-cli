@@ -36,16 +36,18 @@ jobs:
         env:
           EXT: ${{ matrix.goos == 'windows' && '.exe' || '' }}
         run: |
+          # Plain name inside the archive: the version belongs to the archive,
+          # not to the binary, or `bin.install "home-assistant-cli"` in the brew
+          # formula has nothing to install.
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -ldflags="-s -w" \
-            -o "home-assistant-cli-$VERSION-${{ matrix.name }}$EXT" .
+            go build -trimpath -ldflags="-s -w" -o "home-assistant-cli$EXT" .
 
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.name }}
           # ${{ env.VERSION }}, not $VERSION: an input is not a shell, and a
           # literal $VERSION globs nothing and uploads nothing.
-          path: home-assistant-cli-${{ env.VERSION }}-${{ matrix.name }}*
+          path: home-assistant-cli*
 
   publish:
     needs: build
@@ -57,16 +59,16 @@ jobs:
 
       - name: Package
         run: |
-          for dir in dist/*/; do
-            file=$(basename "$(ls "$dir")")
-            arch=$(sed -E 's/^home-assistant-cli-v[0-9.]+-(darwin|linux|windows)-(arm64|amd64)(\.exe)?$/\1-\2/' <<<"$file")
+          for dir in dist/bin-*/; do
+            arch=${dir#dist/bin-}; arch=${arch%/}
+            file=$(ls "$dir")
             if [[ $file == *.exe ]]; then
               zip -q "home-assistant-cli-$VERSION-$arch.zip" -j "$dir/$file"
             else
               tar -czf "home-assistant-cli-$VERSION-$arch.tar.gz" -C "$dir" "$file"
             fi
           done
-          ls -l home-assistant-cli-$VERSION-*
+          ls -l home-assistant-cli-${{ env.VERSION }}-*
 
       - uses: softprops/action-gh-release@v2
         with:
