@@ -89,8 +89,10 @@ jobs:
           import hashlib, pathlib, re, sys
           ver = sys.argv[1].removeprefix("v")
           base = "https://github.com/ynui/home-assistant-cli/releases/download"
+          # ".." is the workspace: the package step writes the archives beside
+          # dist/, not inside it, and dist/ holds only the raw binaries.
           shas = {}
-          for f in pathlib.Path("../dist").glob("home-assistant-cli-*.tar.gz"):
+          for f in pathlib.Path("..").glob("home-assistant-cli-*.tar.gz"):
               m = re.fullmatch(r"home-assistant-cli-v[\d.]+-(darwin|linux)-(arm64|amd64)\.tar\.gz", f.name)
               shas[f"{m[1]}-{m[2]}"] = hashlib.sha256(f.read_bytes()).hexdigest()
           path = pathlib.Path("Formula/home-assistant-cli.rb")
