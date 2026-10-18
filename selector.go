@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// A token from the command line is resolved in three steps: an exact entity
-// id, then a group (the entity's domain), then a fuzzy substring match on the
-// entity id or friendly name.
+// A token from the command line is resolved in three steps: exact entity id,
+// then the entity's domain, then a fuzzy match on id or friendly name.
 
 // domain is the part of an entity id before the dot.
 func domain(entityID string) string {
@@ -18,12 +17,9 @@ func domain(entityID string) string {
 	return entityID
 }
 
-// resolve turns tokens into entities.
-//
-// Reads pass all=true and get whatever matched. Writes pass all=false, which
-// refuses any token matching more than one entity unless --all was given: a
-// token matching several entities is by definition not an exact id, so acting
-// on them would be a guess.
+// resolve turns tokens into entities. Reads pass all=true and get whatever
+// matched. Writes pass all=false: a token matching more than one entity is
+// not an exact id, so acting on it without --all would be a guess.
 func resolve(states []State, tokens []string, all bool) ([]State, error) {
 	var out []State
 	seen := map[string]bool{}
@@ -129,14 +125,10 @@ func entityIDs(states []State) []string {
 var targetKeys = []string{"entity_id", "entity_ids"}
 
 // resolveTargets expands entity_id / entity_ids values through match, so
-// `has call light.turn_on entity_id=kitchen` means what every other selector
-// means. Two deliberate differences from a plain resolve:
-//
-//   - a token matching more than one entity is refused without --all, the same
-//     rule writes get, because a service call is a write;
-//   - a token matching nothing is passed through untouched. entity_id is not
-//     always an entity id (notify.* takes a device id), and Home Assistant is
-//     the authority on what that key means.
+// `has call light.turn_on entity_id=kitchen` follows the same selector rules
+// as every other command. Unlike a plain resolve: a token matching nothing is
+// passed through untouched, because entity_id is not always an entity id
+// (notify.* takes a device id) and Home Assistant decides what it means.
 func resolveTargets(c *Client, data map[string]any, all bool) error {
 	var keys []string
 	for _, k := range targetKeys {

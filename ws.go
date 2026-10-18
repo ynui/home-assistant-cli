@@ -13,14 +13,11 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-// Home Assistant has no push channel over REST, so the WebSocket API at
-// /api/websocket is the only way to be told about a change instead of asking.
-// We use one feature of it — a subscription to state_changed — and that is
-// enough to retire the hover poll as the normal path: the row you act on
-// updates the moment Home Assistant applies the action, and a group count is as
-// fresh as the server, not as fresh as the last time you looked at that group.
+// Home Assistant has no push channel over REST, so the WebSocket API is how
+// the TUI gets told about changes instead of polling. One feature is used: a
+// subscription to state_changed.
 //
-// The exchange is fixed and short:
+// The exchange:
 //
 //	<- {"type":"auth_required"}
 //	-> {"type":"auth","access_token":…}
@@ -29,37 +26,32 @@ import (
 //	<- {"id":1,"type":"result","success":true}
 //	<- {"id":1,"type":"event","event":{"data":{"entity_id":…,"new_state":{…}}}}
 //
-// Nothing here decides policy. Every failure comes back as a message and
-// uiModel decides: a refused connection falls back to polling, a dropped one is
-// reconnected, a rejected token is reported and given up on.
+// Nothing here decides policy. Every failure comes back as a message and the
+// uiModel decides: refused means fall back to polling, dropped means
+// reconnect, a rejected token is final.
 
-// wsPingInterval is how often we prove the socket is still alive. A TCP
-// connection through NAT or a proxy can die without either end noticing, and a
-// silently stale list is worse than a reconnecting one.
+// wsPingInterval is how often we prove the socket is still alive; a connection
+// through a proxy can die without either end noticing.
 const wsPingInterval = 30 * time.Second
 
-// wsPingTimeout bounds the pong we wait for. A ping that never answers is the
-// only evidence we get of a half-open connection.
+// wsPingTimeout bounds the pong we wait for.
 const wsPingTimeout = 10 * time.Second
 
-// wsReadLimit caps one message. The library's 32 KiB default is close to what a
-// chatty entity (media player, calendar) can push in a single state_changed.
+// wsReadLimit caps one message; the library's 32 KiB default is too small for
+// chatty entities.
 const wsReadLimit = 1 << 20
 
 // wsMaxReconnect caps the backoff between dropped-connection retries.
 const wsMaxReconnect = 15 * time.Second
 
 // wsConnectTries is how many times a refused handshake is retried before the
-// program settles for polling. Enough to cover a Home Assistant that is still
-// starting; few enough that a proxy which blocks the upgrade is not asked
-// forever.
+// program settles for polling: enough for a HA that is still starting, few
+// enough that a proxy blocking the upgrade is not asked forever.
 const wsConnectTries = 3
 
-// wsSend is what we write, and it must stay exactly this small. Home Assistant
-// validates every message against a schema and rejects unknown keys, so a
-// struct shared with the read path fails the handshake with "Auth message
-// incorrectly formatted" the moment a receive-only field is added to it — which
-// is what happened: `success` and `event` rode along in the auth message.
+// wsSend is what we write, and it must stay this small: HA rejects unknown
+// keys, so a struct shared with the read path breaks the handshake. Two
+// readers would need its fields anyway.
 type wsSend struct {
 	ID          int    `json:"id,omitempty"`
 	Type        string `json:"type"`
@@ -88,46 +80,42 @@ type wsRecv struct {
 	} `json:"event"`
 }
 
-// Messages from the socket to the model. Each one is a single tea.Msg so the
-// whole connection is driven from Update, with no goroutine of our own.
-//
-// The socket messages carry the connection they arrived on, and the model drops
-// any that is not the one it currently holds. A read armed on a socket we have
-// already replaced would otherwise report the old connection's death as the
-// current one's, closing a live socket and reconnecting forever.
+// Messages from the socket to the model, one tea.Msg each so everything is
+// driven from Update. The socket messages carry the connection they arrived
+// on, and the model drops any that is not the one it currently holds - a read
+// armed on an old socket would otherwise report that socket's death as the
+// live one's.
 
 type wsConnMsg struct{ conn *websocket.Conn }
 
-// wsFailedMsg is a handshake that never completed: no socket, so the model
-// falls back to polling and says why.
+// wsFailedMsg is a handshake that never completed; the model falls back to
+// polling.
 type wsFailedMsg struct{ err error }
 
-// wsGoneMsg is a connection that dropped. The model reconnects.
+// wsGoneMsg is a connection that dropped; the model reconnects.
 type wsGoneMsg struct {
 	conn *websocket.Conn
 	err  error
 }
 
-// wsRejectedMsg is a token Home Assistant refused. Retrying would only spam, so
-// this one is final and the reason is worth printing.
+// wsRejectedMsg is a token HA refused; final, no retry.
 type wsRejectedMsg struct{ err error }
 
-// wsStateMsg is one state_changed event.
+// wsStateMsg is one state_changed event. NewState is nil when the entity was
+// removed.
 type wsStateMsg struct {
 	conn     *websocket.Conn
 	entityID string
-	state    *State // nil when the entity was removed
+	state    *State
 }
 
-// wsIdleMsg is a frame that is not an event (a pong, a stray result). The read
-// is re-armed and nothing else happens.
+// wsIdleMsg is a frame that is not an event (a pong, a stray result).
 type wsIdleMsg struct{ conn *websocket.Conn }
 
 // wsAliveMsg says a ping was answered.
 type wsAliveMsg struct{ conn *websocket.Conn }
 
-// wsURL turns the configured base URL into the WebSocket endpoint. HA serves it
-// under the same origin at /api/websocket.
+// wsURL turns a base URL into the WebSocket endpoint at /api/websocket.
 func wsURL(base string) string {
 	trimmed := strings.TrimRight(base, "/")
 	switch {
@@ -178,9 +166,7 @@ func wsConnect(c *Client, timeout time.Duration, eventType string) (*websocket.C
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	// The context covers the handshake only; it is not the connection's lifetime.
-	// It hangs off the program-wide one, so ^C aborts a connect that is stuck
-	// rather than waiting out the timeout.
+	// The context covers the handshake only, not the connection's lifetime.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -217,8 +203,8 @@ func wsConnect(c *Client, timeout time.Duration, eventType string) (*websocket.C
 	}); err != nil {
 		return conn, err
 	}
-	// The subscription is answered with a result message carrying the same id.
-	// Waiting for it means "connected" really means subscribed.
+	// The subscription is answered with a result carrying the same id; waiting
+	// for it means "connected" really means subscribed.
 	if err := wsjson.Read(ctx, conn, &m); err != nil {
 		return conn, err
 	}
@@ -232,8 +218,7 @@ func wsConnect(c *Client, timeout time.Duration, eventType string) (*websocket.C
 	return conn, nil
 }
 
-// wsReadCmd blocks for one message. The model re-arms it after every message, so
-// the socket is only read from where the rest of the program is decided.
+// wsReadCmd blocks for one message; the model re-arms it after every message.
 func wsReadCmd(conn *websocket.Conn) tea.Cmd {
 	return func() tea.Msg {
 		_, data, err := conn.Read(ctx)
@@ -252,8 +237,7 @@ func wsReadCmd(conn *websocket.Conn) tea.Cmd {
 	}
 }
 
-// wsPingCmd proves the socket is alive. An unanswered ping is the only way to
-// notice a connection that died without closing.
+// wsPingCmd proves the socket is alive.
 func wsPingCmd(conn *websocket.Conn) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(ctx, wsPingTimeout)
@@ -265,17 +249,15 @@ func wsPingCmd(conn *websocket.Conn) tea.Cmd {
 	}
 }
 
-// wsBackoff spaces out reconnect attempts so a server that is down is not asked
-// once a second. Capped: coming back late is worse than a few extra tries.
+// wsBackoff spaces out reconnect attempts, capped.
 func wsBackoff(tries int) time.Duration {
 	return min(time.Second<<min(tries, 4), wsMaxReconnect)
 }
 
-// wsEvent is one frame of the general event stream, kept apart from wsRecv on
-// purpose. wsRecv decodes a state_changed straight into typed fields, which is
-// what the TUI wants for the event it subscribed to; anything else needs the raw
-// bytes of an event the TUI would only throw away, and a second unmarshal per
-// state_changed to get them.
+// wsEvent is one frame of a general event stream, kept apart from wsRecv: the
+// TUI wants a state_changed decoded into typed fields, `has watch` wants the
+// raw bytes, and merging them would cost the TUI an unmarshal per event for
+// data it throws away.
 type wsEvent struct {
 	Type  string `json:"type"`
 	Event struct {
@@ -285,20 +267,17 @@ type wsEvent struct {
 }
 
 // wsStream subscribes to one event type and hands every event to fn until the
-// socket dies or ctx is done. It is not a tea.Cmd because nothing else in the
-// program drives it: `has watch` owns the terminal until it is stopped.
-//
-// It reports whether the subscription ever succeeded, so the caller can tell a
-// server that was never reachable (a few tries, then give up) from one that went
-// away mid-tail (keep going: a house that restarts should not need a restart).
+// socket dies or ctx is done. Not a tea.Cmd: `has watch` owns the terminal.
+// The bool reports whether the subscription ever succeeded, so the caller can
+// tell an unreachable server (give up after a few tries) from one that went
+// away mid-tail (keep going; a house that restarts should not need this
+// program restarted too).
 func wsStream(ctx context.Context, c *Client, timeout time.Duration, eventType string,
 	fn func(eventType string, data json.RawMessage)) (bool, error) {
 
 	conn, err := wsConnect(c, timeout, eventType)
 	if err != nil {
-		// wsConnect hands back whatever it opened even on failure - a socket that
-		// got as far as auth_invalid is still a socket, and Home Assistant holds
-		// the session until it times out.
+		// wsConnect hands back its socket even on failure; close it.
 		if conn != nil {
 			conn.CloseNow()
 		}
@@ -308,8 +287,8 @@ func wsStream(ctx context.Context, c *Client, timeout time.Duration, eventType s
 	go wsKeepAlive(ctx, conn)
 
 	for {
-		// A fresh frame each time: unmarshalling into a reused one leaves a field
-		// the frame did not carry holding the previous frame's value.
+		// A fresh frame each time: unmarshalling into a reused one leaves
+		// fields holding the previous frame's values.
 		var frame wsEvent
 		if _, data, err := conn.Read(ctx); err != nil {
 			return true, err
@@ -323,10 +302,9 @@ func wsStream(ctx context.Context, c *Client, timeout time.Duration, eventType s
 	}
 }
 
-// wsKeepAlive proves the socket is alive from outside the read loop, which is
-// the same job the TUI's ping tick does from inside. A ping that is never
-// answered closes the connection: a tail that has gone quiet must fail loudly
-// rather than sit there implying it is still live.
+// wsKeepAlive proves the socket is alive from outside the read loop (`has
+// watch`'s version of the TUI's ping tick). An unanswered ping closes the
+// connection: a tail that has gone quiet must fail loudly.
 func wsKeepAlive(ctx context.Context, conn *websocket.Conn) {
 	for {
 		select {

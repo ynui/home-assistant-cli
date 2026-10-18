@@ -1,145 +1,116 @@
 # home-assistant-cli (`has`)
 
-[![CI](https://github.com/ynui/home-assistant-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/ynui/home-assistant-cli/actions/workflows/ci.yml)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-
-A small command-line client for [Home Assistant](https://home-assistant.io),
-installed as `has`. Control devices and check state; nothing more.
+A small command-line client for [Home Assistant](https://home-assistant.io).
+Control devices and check state; nothing more.
 
 ![the TUI](demo/demo.gif)
 
 ## Install
 
 ```sh
-brew install ynui/tap/home-assistant-cli   # provides home-assistant-cli and has
+brew install ynui/tap/home-assistant-cli
 ```
 
-The `has` name also exists in homebrew-core; `brew unlink has` first if needed.
-
-```sh
-go install github.com/ynui/home-assistant-cli@latest
-ln -sf "$(go env GOPATH)/bin/home-assistant-cli" "$(go env GOPATH)/bin/has"   # optional
-```
-
-Or `make install` from a checkout (puts both names in `~/.local/bin`), or grab a
-binary from the [releases](https://github.com/ynui/home-assistant-cli/releases).
-
-Needs Go 1.26+ to build. Three dependencies: bubbletea, lipgloss, and a
-WebSocket client (stdlib has none).
+If another tool already owns the `has` name, run `brew unlink has` first.
+Other options: `go install github.com/ynui/home-assistant-cli@latest`,
+`make install` from a checkout, or a binary from the
+[releases](https://github.com/ynui/home-assistant-cli/releases).
 
 ## Setup
 
-Get a long-lived access token from your HA profile (`<url>/profile`), then:
+Get a long-lived access token from your HA profile (open `<url>/profile`),
+then:
 
 ```sh
 has login
 ```
 
-It prompts for URL and token, verifies them, and writes `~/.config/has/config.json`
-(mode `0600`). Re-run to replace a revoked token.
+It asks for the URL and token, checks they work, and saves them to
+`~/.config/has/config.json`. Run it again to replace a token.
 
 ## Commands
 
 ```
-has groups
-has areas [selector...]
-has list [selector...] [--sort entity|name|state|changed|updated] [--reverse] [--limit N] [--brief]
-has get <entity>
-has on|off|toggle <selector...> [--all] [--dry-run]
+has groups                        # domains and how many entities each has
+has list [selector...]            # [--sort entity|name|state|changed]
+has get <entity>                  # one entity, with attributes
+has on|off|toggle <selector...>   # [--all] [--dry-run]
 has call <domain.service> [k=v...] [--all] [--dry-run]
-has history <entity...> [--since 7d]
-has logbook [selector...] [--day today|yesterday|YYYY-MM-DD] [--limit N]
-has watch [selector...] [-o json]
-has services [pattern]
-has template <jinja>          # reads stdin if omitted
-has ui [--expand] [--poll N] [--mouse] [--view groups|areas|states|flat]
+has history <entity...>           # state changes, [--since 7d]
+has logbook [selector...]         # events incl. automations, [--day today]
+has watch [selector...]           # state changes as they happen
+has services [pattern]            # what can be called
+has template <jinja>              # render a template (stdin if omitted)
+has ui                            # the interactive client
 has version
 ```
 
 Global flags: `-o table|json`, `--url`, `--token`, `--timeout`.
 
-`logbook` is "what just happened" (recorded events, including automations); `history`
-is state changes for named entities. `watch` tails them live over the WebSocket.
-
 ## Selectors
 
-An exact entity id, a domain (trailing `s` stripped), or a fuzzy substring of
-the id or friendly name:
+An exact id, a domain, or a piece of the id or name:
 
 ```sh
-has list light.kitchen_light   # exact
-has list lights                # domain
-has list kitchen               # fuzzy
+has list light.kitchen_light   # exact id
+has list lights                # whole domain
+has list kitchen               # anything with "kitchen" in id or name
 ```
 
-Reads accept many matches; writes need `--all` when more than one matches.
-`--dry-run` resolves and prints without calling.
+Reads accept many matches. Writes refuse more than one unless you pass
+`--all`; `--dry-run` shows what would be affected without calling.
 
 ## Scripting
 
-Results go to stdout, warnings to stderr; `-o json` on every command. Exit codes:
-`0` ok, `1` error, `2` bad invocation, `3` selector matched nothing/too many,
-`4` token refused, `5` server unreachable. Env: `HAS_URL`, `HAS_TOKEN`, `HAS_CONFIG`.
-
-`list -o json` returns everything the server sent; `--brief` returns just
-`entity_id`, `name`, `state`. `template` prints its result verbatim (so
-`... | jq` works). `has groups` is a cheap starting point (~a few hundred bytes).
+Results go to stdout, warnings to stderr, so output can be piped and captured.
+`-o json` works on every command. Exit codes: `0` ok, `1` error, `2` bad
+command line, `3` selector matched nothing or too much, `4` token refused,
+`5` server unreachable. `HAS_URL`, `HAS_TOKEN` and `HAS_CONFIG` override the
+saved config; flags override them.
 
 ## The TUI
 
-`has ui` shows actionable entities only (read-only hidden); search reaches all.
-Every run starts with groups folded.
-
-Header: `shown/total · folded · live|polling|connecting`. Live via WebSocket,
-with polling fallback for the highlighted row; reconnects on its own.
+`has ui` shows entities you can act on; search (`/`) reaches every entity.
+Key bindings:
 
 | key | action |
 |---|---|
-| `/` | search (all printables become filter text) |
+| `/` | search |
 | `↑`/`↓`, `pgup`/`pgdn`, `home`/`end` | navigate |
 | `←`/`→` | fold / unfold group |
-| `enter` | toggle group, or open action menu |
-| `space` | primary action |
+| `enter` | open group, or open action menu |
+| `space` | run main action |
 | `1`-`9` | run that action (menu open) |
-| `f` | favorite / pin |
-| `v` | cycle grouping: groups, areas, states, flat |
+| `f` | pin/unpin favorite |
+| `v` | change grouping: groups, areas, states, flat |
 | `ctrl+d` | entity attributes panel |
 | `alt+↑`/`alt+↓` | move group or favorite |
-| `ctrl+a` | toggle read-only entities |
-| `ctrl+u` / `ctrl+r` | clear filter / refresh |
-| `?` | help overlay |
-| `esc` | close panel, filter, or fold group |
+| `ctrl+a` | show/hide read-only entities |
+| `ctrl+u` / `ctrl+r` | clear search / refresh |
+| `?` | help |
+| `esc` | close panel, search, or group |
 | `ctrl+c` | quit |
 
-Favorites are a copy: pinned entities also stay in their own group, marked `★`.
-Group order, favorites and view persist in `~/.config/has/ui.json` (no secrets).
-Fold state does not persist. `--expand` opens all groups; `--mouse` enables clicks.
+The header shows whether the connection is `live` (WebSocket) or `polling`;
+it reconnects on its own. Saved in `~/.config/has/ui.json`: favorites, group
+order and view. Groups always start folded; `--expand` opens them all.
 
 ## Development
 
 ```sh
-make            # fmt, vet, lint, test, build
+make                        # format, check, lint, test, build
 make run ARGS="list kitchen"
 ```
 
-`demo/fakeha` is a canned Home Assistant for trying changes without a real house:
+`demo/fakeha` is a fake Home Assistant for testing without a real house:
 
 ```sh
+make build
 go run ./demo/fakeha &
 HAS_URL=http://127.0.0.1:8123 HAS_TOKEN=demo ./bin/home-assistant-cli ui
 ```
 
-`make demo` re-records `demo/demo.gif` with vhs. Test fixtures are copied from
-real HA responses.
-
-## Notes
-
-- Config: `~/.config/has/config.json`; presentation: `~/.config/has/ui.json`.
-  `HAS_URL`, `HAS_TOKEN`, `HAS_CONFIG` override; flags override those.
-- Long-lived token only; no OAuth.
-- Interactive `login` uses `stty`, so that prompt is Unix-only.
-- Areas come from one template render (HA keeps them out of `/api/states`).
-  Most entities have none.
+`make demo` re-records `demo/demo.gif`.
 
 ## License
 

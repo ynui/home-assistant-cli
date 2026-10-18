@@ -9,17 +9,16 @@ import (
 	"path/filepath"
 )
 
-// Config holds the connection details for a single Home Assistant instance.
-// It contains a bearer token that grants full control of the house, so the
-// file is written 0600 inside a 0700 directory.
+// Config holds the connection details. The token grants full control of the
+// house, so the file is written 0600 inside a 0700 directory.
 type Config struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
 }
 
-// configDir is ~/.config/has on every platform, or the directory holding an
-// overridden HAS_CONFIG. Deliberately not os.UserConfigDir(): that would land
-// in ~/Library/Application Support on macOS.
+// configDir is ~/.config/has, or the directory of an overridden HAS_CONFIG.
+// Deliberately not os.UserConfigDir(): that lands in ~/Library/Application
+// Support on macOS.
 func configDir() (string, error) {
 	if p := os.Getenv("HAS_CONFIG"); p != "" {
 		return filepath.Dir(p), nil
@@ -73,9 +72,9 @@ func saveConfig(c Config) error {
 	if err != nil {
 		return err
 	}
-	// Write atomically so a crash or a full disk never leaves a half-written
-	// bearer-token file behind. WriteFile only applies the mode on creation,
-	// so the temp file is chmod'd explicitly.
+	// Write atomically, so a crash never leaves a half-written bearer-token
+	// file. WriteFile only applies the mode on creation, hence the temp-file
+	// Chmod plus the one after rename.
 	if err := atomicWriteFile(p, append(b, '\n'), 0o600); err != nil {
 		return err
 	}
@@ -104,10 +103,9 @@ func configured() (*Client, error) {
 	return newClient(cfg, *flagTimeout)
 }
 
-// atomicWriteFile writes data to path via a temp file in the same directory
+// atomicWriteFile writes data to path via a temp file in the same directory,
 // followed by a rename, so readers never see a partially written file. The
-// mode is applied to the temp file before the rename and again afterwards, since
-// rename preserves the temp file's mode but an existing destination is replaced.
+// mode is applied before and after the rename.
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".has-*")

@@ -3,23 +3,18 @@ package main
 import "sort"
 
 // The action registry turns Home Assistant's service list into "what can I do
-// to this, and is it worth showing at all". Everything is derived from what
-// the server advertises rather than a hardcoded domain table, so custom
-// integrations work too.
+// to this entity". Everything is derived from the server, not a domain table,
+// so custom integrations work too.
 
 // controlVerbs are the no-argument services that count as acting on an entity,
-// in the order they should be offered. The first one a domain has becomes the
-// action bound to space.
-//
-// Home Assistant does not name these consistently - covers use open_cover
-// where locks use open, media players use media_play - so the list is spelt
-// out rather than guessed.
+// in the order they should be offered; the first one a domain has is action
+// number 1. Home Assistant names these inconsistently (open_cover vs open),
+// so the list is explicit.
 var controlVerbs = []string{
 	// the generic power verbs, preferred because they read the same everywhere
 	"toggle", "turn_on", "turn_off", "press", "run", "start", "stop", "pause",
 
-	// position and safety. lock/unlock lead because for a lock they are the
-	// meaningful pair; open on a lock means something different again.
+	// position and safety; open on a lock means something different again.
 	"lock", "unlock", "open", "close",
 	"open_cover", "close_cover", "stop_cover",
 	"set_cover_position", "set_cover_tilt_position", "toggle_cover_tilt",
@@ -75,30 +70,22 @@ type action struct {
 	service string
 	label   string
 	order   int
-	// local marks the pin/unpin entry the sub-menu offers last. Pinning is
-	// something you do to an entity but not a service Home Assistant knows, so
-	// it used to travel as a sentinel string in service - a value from the same
-	// space as a real service name, told apart by matching it.
+	// local marks the pin/unpin entry the sub-menu offers last; it is not a
+	// Home Assistant service.
 	local bool
 }
 
 // registry maps an entity domain to the actions offered for it.
 type registry struct {
 	byDomain map[string][]action
-	// usable is false when the server advertised no target information at
-	// all, which means we cannot tell actionable from read-only and should
-	// show everything rather than show nothing.
+	// usable is false when the server advertised no target information, so
+	// actionable cannot be told apart from read-only - show everything.
 	usable bool
 }
 
-// newRegistry reads the service list. Three filters apply:
-//
-//   - the service must take an entity, so global services like
-//     script.start_bedroom_ac do not make every script look actionable;
-//   - the name must be a known control verb, so sensors, weather and
-//     calendars drop out even where they technically accept a target;
-//   - it must need no required arguments, because we have nothing to pass and
-//     the call would only fail.
+// newRegistry keeps a service only if it takes an entity (global services
+// like script.start_bedroom_ac do not make every script actionable), the name
+// is a known control verb, and it needs no required arguments.
 func newRegistry(services []Service) registry {
 	r := registry{byDomain: map[string][]action{}}
 	seen := map[string]bool{}

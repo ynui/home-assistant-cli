@@ -20,35 +20,28 @@ const pollInterval = 3 * time.Second
 // hoverDelay debounces the re-read while the cursor is moving.
 const hoverDelay = 120 * time.Millisecond
 
-// Column widths for the entity rows. pad() counts runes, so a state like a
-// full ISO timestamp is cut to exactly stateWidth rather than shoving the rest
-// of the row sideways.
+// Column widths for the entity rows; pad() counts runes, so they hold.
 const (
 	stateWidth = 13
 	nameWidth  = 30
 )
 
 // entityGutter is the fixed cost of an entity row in columns, before the name
-// and the id: 3 of indent (one for the frame, two so a row reads as belonging
-// to the group header above it), the 2-wide pointer, a space, the state, a
-// space, and the 2-space gap in front of the id.
+// and the id: indent, pointer, spaces, state.
 const entityGutter = 3 + 2 + 1 + stateWidth + 1 + 2
 
-// defaultHeight is used before the first WindowSizeMsg.
+// Used before the first WindowSizeMsg, so a model built by a test still has a
+// layout.
 const defaultHeight = 24
-
-// defaultWidth is the same. Without a WindowSizeMsg the layout falls back to
-// these rather than collapsing: a model built by a test has no terminal to
-// measure, and tests that care set both fields themselves.
 const defaultWidth = 80
 
-// row is one line of the list: either a group header or one entity inside it.
+// row is one line of the list: a group header, or one entity inside it.
 type row struct {
 	isGroup bool
 	domain  string
 	entity  State
 	// total and on are the whole-domain summary for a header row, computed
-	// once in rows() rather than per drawn line. A non-group row ignores them.
+	// once in rows().
 	total int
 	on    int
 }
@@ -72,27 +65,22 @@ type areasMsg struct {
 }
 
 // oneMsg is a single entity's fresh state, fetched for the highlighted row
-// only. Polling all 387 entities every few seconds is wasteful; the row you
-// are looking at is the one that has to be right.
+// only; polling every entity is wasteful.
 type oneMsg struct {
 	state State
 	gen   int
 	err   error
 }
 
-// toggleMsg is the outcome of a service call made from the UI. state is the
-// server's own new state for that entity, not just its state string: patching a
-// bare {id, state} replaces the whole entry and takes friendly_name with it,
-// which blanks the name on the row you just acted on.
+// toggleMsg is the outcome of a service call from the UI. state is the whole
+// new state: a bare {id, state} patch would blank friendly_name.
 type toggleMsg struct {
 	entity string
 	state  *State // nil when the call changed nothing, or failed
 	err    error
 }
 
-// statusKind colours the status line. Two values, so a bool would read worse at
-// the twenty-odd call sites than the name does - and a typo in a string literal
-// would colour an error as a success silently, which a named type cannot.
+// statusKind colours the status line: ok or err.
 type statusKind string
 
 const (
@@ -108,20 +96,15 @@ type uiModel struct {
 	cursor int
 	status string
 	kind   statusKind
-	// folded records explicit tab presses. A domain with no entry follows
-	// defaultFolded, so starting collapsed does not mean seeding 16 entries.
+	// folded records explicit tab presses; a domain with no entry follows
+	// defaultFolded.
 	folded        map[string]bool
 	defaultFolded bool
 	showAll       bool // ^A: include domains with no actions
-	// view selects how entities are grouped in the list: "groups" (the
-	// default) groups by domain, "areas" by the entity's area, "states" by
-	// state and "flat" by nothing at all. It is a view toggle, not a filter,
-	// so it never changes which entities match. Always a value parseView
-	// returned, never a raw --view string.
+	// view is how entities are grouped: groups, areas, states or flat. A view
+	// toggle, not a filter, so it never changes which entities match.
 	view string
-	// areas maps entity_id to friendly area name, from Client.entityAreas.
-	// Empty until areasMsg lands, and empty for entities that have no area:
-	// they group under "unknown".
+	// areas maps entity_id to friendly area name; empty until areasMsg lands.
 	areas   map[string]string
 	cfg     uiConfig
 	menu    bool // the action sub-menu is open for the highlighted row
@@ -131,16 +114,13 @@ type uiModel struct {
 	height  int
 	ready   bool
 
-	// searching is true only after '/' has been pressed: everything typed
-	// while it is true becomes filter text. While it is false, typing does
-	// nothing, so a houseful of mappings never starts filtering by accident.
+	// searching is true only after '/'; while false, typing does nothing.
 	searching bool
 	// gen invalidates a pending hover fetch when the cursor moves again.
 	gen int
 
-	// Live updates come from the WebSocket when it works and from a re-read of
-	// the highlighted row when it does not. wantWS is off only when the user
-	// asked for no auto-refresh at all (--poll 0).
+	// Live updates come from the WebSocket, with a re-read of the highlighted
+	// row as fallback. wantWS is off only with --poll 0.
 	conn     *websocket.Conn // nil unless we are subscribed right now
 	interval time.Duration   // poll interval for the fallback path, 0 disables live updates
 	wantWS   bool
@@ -183,20 +163,16 @@ func cmdUI(args []string) error {
 		interval: *interval,
 		wantWS:   *interval > 0,
 		polling:  *interval > 0,
-		// Every run starts with the list closed. What ui.json restores is
-		// preferences - the group order, favorites, the grouping view - and
-		// never a snapshot: which groups you happened to leave open yesterday
-		// is not a preference, and a saved one made the list start at 387 rows.
+		// Every run starts with the list closed. ui.json restores preferences
+		// (order, favorites, view), never a snapshot of yesterday's folds.
 		defaultFolded: !*expand,
 	}
-	// The flag wins; an empty one means "use whatever ui.json remembers",
-	// normalised so an alias in the file still resolves.
 	if *view == "" && cfg.View != "" {
 		chosen, _ = parseView(cfg.View)
 	}
 	m.setView(string(chosen))
-	// Clicking a row beats typing a filter, but enabling the mouse takes it away
-	// from terminal text selection, so it stays opt-in.
+	// Mouse tracking takes the pointer away from terminal text selection, so
+	// it stays opt-in.
 	if *mouse {
 		opts = append(opts, tea.WithMouseCellMotion())
 	}
@@ -440,9 +416,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, wsPingCmd(m.conn)
 
 	case wsFailedMsg:
-		// No socket. The highlighted row still gets re-read, which is what the
-		// program did before this existed. A few retries cover a server that is
-		// still starting; past that, stop asking and leave the user on polling.
+		// No socket; polling continues. A few retries cover a server that is
+		// still starting, past that give up.
 		m.polling = m.interval > 0
 		m.tries++
 		if m.wantWS && m.tries < wsConnectTries {
@@ -498,32 +473,24 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// runeKeys are the printable keys that do something outside a search. Each
-// entry returns its own command: `?` toggles an overlay and must not schedule a
-// hover re-read, while the other two move the cursor and must.
-//
-// The table is consulted only when m.searching is false, which is what keeps
-// every letter free as filter text: the guard lives in one place rather than
-// being repeated per entry, so a key added here cannot start eating somebody's
-// query.
+// runeKeys are the printable keys that do something outside a search. The
+// table is consulted only when m.searching is false, which is what keeps every
+// letter free as filter text.
 var runeKeys = map[rune]func(*uiModel) tea.Cmd{
 	'f': func(m *uiModel) tea.Cmd { m.toggleFavorite(); return m.afterMove() },
 	'v': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
 	'V': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
-	// It lands on top of the details panel rather than beside it, so that one
-	// goes away - and going back to it is one ^D away.
+	// An overlay, not a panel, so it closes the details panel.
 	'?': func(m *uiModel) tea.Cmd { m.help = !m.help; m.details = false; return nil },
 }
 
 // Actions deliberately avoid letters: the filter is typed with letters, so
-// "kitchen" must not be read as the k binding. While the action sub-menu is
-// open the digits 1-9 run a menu entry directly, which is the one place they
-// are not filter text.
+// "kitchen" must not be read as the k binding. Digits 1-9 run menu entries
+// while the sub-menu is open.
 func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// With the sub-menu open the menu owns the keyboard: anything menuKey does
-	// not handle is dropped rather than falling through to the list or the
-	// filter, so no keystroke can move the selection or edit the filter under
-	// an open menu.
+	// not handle is dropped, so no keystroke can edit the filter under an
+	// open menu.
 	if m.menu {
 		if cmd, done := m.menuKey(msg); done {
 			return m, cmd
@@ -539,11 +506,9 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyEsc:
-		// Go back, one layer at a time, and never quit: sub-menu, help, details,
-		// filter, then one more group folded. It only ever closes — a press that
-		// could also unfold would make two presses of esc undo each other, and
-		// the point of pressing it repeatedly is to end up with everything shut.
-		// ctrl+c is the only way out.
+		// Esc only ever closes, one layer at a time: sub-menu, help, details,
+		// filter, then one group folded. It never quits or unfolds - a press
+		// that could unfold would make two presses undo each other. ^C quits.
 		if m.menu {
 			m.closeMenu()
 			return m, nil
@@ -565,8 +530,7 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.foldDown()
 		return m, m.afterMove()
 	case tea.KeyCtrlN, tea.KeyDown:
-		// alt+arrows reorder, which is a persistent change to the saved layout
-		// and should never be a thing you hit while scrolling.
+		// alt+arrows reorder (a change to the saved layout), arrows scroll.
 		if msg.Alt {
 			return m, m.nudge(1)
 		}
@@ -591,9 +555,8 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.lastEntity()
 		return m, m.afterMove()
 	case tea.KeyLeft:
-		// Fold, the way a tree does, and land on the header you just closed.
-		// Without that the cursor stays on the row index and silently becomes
-		// the next group's header, so the following → unfolded the wrong one.
+		// Fold and land on the header: staying on the index would make the
+		// next → unfold the wrong group.
 		if r, ok := m.rowAt(m.cursor); ok {
 			m.setFolded(r.domain, true)
 			m.focusHeader(r.domain)
@@ -607,9 +570,8 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeySpace:
-		// Space is printable, so it is filter text inside a search ("living
-		// room") and the primary action outside one. The two cannot collide:
-		// typing only happens in search mode.
+		// Filter text inside a search ("living room"), the primary action
+		// outside one; typing only happens in search mode.
 		if m.searching {
 			m.filter += " "
 			m.resetCursor()
@@ -633,9 +595,8 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.details = !m.details
 		return m, nil
 	case tea.KeyCtrlV:
-		// ^G, ^T and ^O used to cycle the view too. Four keys for one action,
-		// three of them in neither the help popup nor the README, is the same
-		// shotgun a dead alias list is: nobody remembers which one to press.
+		// One key for one action; ctrl+g/t/o were cut because nobody
+		// remembered which alias to press.
 		m.cycleViewAndSelect()
 		return m, m.afterMove()
 	case tea.KeyCtrlA:
@@ -731,9 +692,9 @@ func (m *uiModel) menuKey(msg tea.KeyMsg) (tea.Cmd, bool) {
 	case tea.KeyCtrlC:
 		return tea.Quit, true
 	case tea.KeyRunes:
-		// Digits run the action directly: a media_player has ten actions, and
-		// arrows alone would take ten presses to reach the last one. Digits
-		// are free here because the filter is not being typed into.
+		// Digits run the action directly: arrows alone could take ten
+		// presses to reach the last of ten actions. Free here because the
+		// filter is not being typed into.
 		if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
 			i := int(msg.Runes[0] - '1')
 			acts := m.actionsFor(m.cursor)
@@ -761,10 +722,7 @@ func (m *uiModel) menuMove(d int) {
 	}
 }
 
-// viewMode is how entities are grouped in the list. One field holds it
-// (uiModel.view) and the constants keep the names in one place: currentView()
-// used to re-parse the string on every rows() call, which is once per entity
-// per frame.
+// viewMode is how entities are grouped in the list.
 type viewMode string
 
 const (
@@ -774,9 +732,9 @@ const (
 	viewFlat   viewMode = "flat"
 )
 
-// parseView maps a --view value, or a saved ui.json entry, onto one of the
-// four groupings. The aliases are what people actually type, so they are
-// accepted; anything else is an error rather than a quiet default.
+// parseView maps a --view value or a saved ui.json entry onto one of the four
+// groupings. Aliases are accepted; anything else is an error, not a quiet
+// default.
 func parseView(s string) (viewMode, error) {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "", "groups", "group", "domain", "domains", "default":
@@ -807,10 +765,8 @@ func (m *uiModel) nudge(delta int) tea.Cmd {
 	return m.nudgeGroup(r, delta)
 }
 
-// nudgeFavorite moves a favorite up or down the favorites group. Favorites are
-// the one place a single entity has an order of its own; anywhere else rows are
-// sorted by id, so an entity outside favorites has nothing to move within and
-// its keys move its domain group instead.
+// nudgeFavorite moves a favorite up or down the favorites group, the one place
+// a single entity has an order of its own.
 func (m *uiModel) nudgeFavorite(r row, delta int) tea.Cmd {
 	id := r.entity.EntityID
 	if r.domain != favoritesGroup || !m.cfg.isFavorite(id) {
@@ -839,22 +795,15 @@ func (m *uiModel) nudgeFavorite(r row, delta int) tea.Cmd {
 	return nil
 }
 
-// nudgeGroup moves the highlighted group one place through the order the list is
-// showing, then saves that order under the current view: domains for the groups
-// view, areas for the areas view, states for the states view. One order each,
-// because the names live in different spaces — an area order saved as a domain
-// order would bury the domain one.
-//
-// It used to swap inside the saved pin list, which is a different thing: with
-// nothing pinned - a fresh install, or anyone who has never pressed alt+up -
-// every domain is unpinned, so there was nothing to swap inside, "move down"
-// could never do anything, and the group at the top of the screen reported
-// itself "already bottom". One concept now: the order is the whole order, and
-// a move is a swap with the neighbour you can see.
+// nudgeGroup moves the highlighted group one place through the order the list
+// is showing, then saves that order under the current view: domains for the
+// groups view, areas for the areas view, states for the states view. One order
+// each, because the names live in different spaces - an area order saved as a
+// domain order would bury the domain one.
 func (m *uiModel) nudgeGroup(r row, delta int) tea.Cmd {
-	// The swap is between the groups on screen, so every press moves something
-	// you can see. The saved order also holds groups ^A is hiding, and trading
-	// places with one of those reports a move that never happened on screen.
+	// The swap is between visible groups only; the saved order also holds
+	// groups ^A is hiding, and trading places with one of those reports a
+	// move that never happened on screen.
 	shown := m.groupOrder(m.matched())
 	i := slices.Index(shown, r.domain)
 	j := i + delta
@@ -879,8 +828,7 @@ func (m *uiModel) nudgeGroup(r row, delta int) tea.Cmd {
 		return nil
 	}
 	m.setStatus(fmt.Sprintf("moved %s to %s", r.domain, endWord(delta)), statusOK)
-	// The group moved, not the cursor: it used to reset to the first entity,
-	// which threw you to the top of the list on every reorder.
+	// The group moved; the cursor stays on it.
 	m.follow(r)
 	return m.hoverCmd()
 }
@@ -892,9 +840,8 @@ func endWord(delta int) string {
 	return "bottom"
 }
 
-// favoritesGroup is the name of the group favorites are gathered into. It is not
-// a domain, an area or a state, which is why it is the one header marked with a
-// star and the one that starts open.
+// favoritesGroup is the name of the group favorites are gathered into: not a
+// domain, an area or a state, so it is the one header marked with a star.
 const favoritesGroup = "favorites"
 
 // actionsFor is the action list for the highlighted row, empty on a group.
@@ -908,9 +855,8 @@ func (m *uiModel) actionsFor(i int) []action {
 	d := domain(r.entity.EntityID)
 	acts := append([]action(nil), m.reg.actions(d)...)
 	if len(acts) == 0 {
-		// Nothing to act on, so no menu: "nothing to do with sun.sun" is the
-		// honest answer, and space must not fall through to pinning an entity.
-		// `f` still pins one, whatever it is.
+		// Nothing to act on, so no menu, and space must not fall through to
+		// pinning. `f` still pins one.
 		return nil
 	}
 	label := "favorite"
@@ -933,9 +879,8 @@ func (m *uiModel) runAction(n int) tea.Cmd {
 		return nil
 	}
 	d := domain(r.entity.EntityID)
-	// actionsFor, not the registry: the menu draws the favorite entry too, so
-	// running entry n of the menu has to use the same list. Index 0 is still
-	// the primary registry action, because the favorite is appended last.
+	// Use actionsFor, not the registry: the menu draws the favorite entry, so
+	// running entry n of the menu needs the same list.
 	acts := m.actionsFor(m.cursor)
 	if len(acts) == 0 {
 		m.setStatus(fmt.Sprintf("nothing to do with %s", r.entity.EntityID), statusErr)
@@ -973,22 +918,17 @@ func (m *uiModel) toggleFavorite() {
 		word = "favorited"
 	}
 	m.setStatus(fmt.Sprintf("%s %s", word, id), statusOK)
-	// Pinning adds a group and a row above everything else, and unpinning takes
-	// one away: the row under the cursor is not the row that was under it.
+	// Pinning adds a row, unpinning removes one: the row under the cursor is
+	// not the row that was under it.
 	m.follow(r)
 }
 
 // follow puts the cursor back on the row it was on, matched by identity rather
-// than by index. Anything that adds or removes rows — pinning, reordering,
-// switching grouping — shifts every index below it, so a cursor held by number
-// lands on whatever slid into its place.
-//
-// The group is part of the identity, and that is the whole point of a favorite
-// being a copy rather than a move: the same entity is in two groups at once, so
-// matching the entity alone drags the cursor up to the favorites copy of the row
-// you were standing on. When the exact row is gone — a new grouping calls the
-// group something else, or the row was the copy that unpinning just deleted —
-// the same entity is the next best thing.
+// than by index: anything that adds or removes rows shifts every index below
+// it. The group is part of the identity - a favorite is a copy, so the same
+// entity is in two groups at once and matching the entity alone would drag the
+// cursor to the favorites copy. When the exact row is gone, the same entity is
+// the next best match; otherwise the cursor clamps.
 func (m *uiModel) follow(was row) {
 	rows := m.rows()
 	if i, ok := indexRow(rows, was, true); ok {
@@ -1024,11 +964,8 @@ func indexRow(rows []row, was row, sameGroup bool) (int, bool) {
 }
 
 // patch merges one entity's state in place, keeping group membership and
-// ordering stable. A websocket state_changed event is exactly this shape.
-//
-// Attributes are carried over when the patch has none: three callers feed this
-// (an event, a single-entity read, a service call) and a patch that arrives
-// without them would otherwise blank friendly_name, which is the row's name.
+// ordering stable. Attributes are carried over when the patch has none, so a
+// patch without them cannot blank the row's name.
 func (m *uiModel) patch(s State) {
 	if s.EntityID == "" {
 		return
@@ -1086,9 +1023,8 @@ func (m *uiModel) matched() []State {
 		for _, s := range out {
 			seen[s.EntityID] = true
 		}
-		// The grouping's own value is searchable too: an area name or a state
-		// is what is on screen, so it is what should be typeable. Groups and
-		// flat have no such value and fall through with hay empty.
+		// The grouping's own value is searchable too: an area name or a
+		// state is what is on screen. Groups and flat have no such value.
 		for _, s := range m.states {
 			if seen[s.EntityID] {
 				continue
@@ -1139,12 +1075,9 @@ func (m *uiModel) expanded(d string) bool {
 	return !m.isFolded(d)
 }
 
-// rows is the flattened, visible list the cursor walks. Favorites go first, as
-// their own group at the top - in the order ui.json gives them, which is the
-// order alt+arrows moves them in - and they stay where they are as well. A
-// favorite is a second copy, not a move: an entity you pinned to the top still
-// belongs to its domain, its area and its state, and counting it in only one
-// place made the other group look like it had lost something.
+// rows is the flattened, visible list the cursor walks. Favorites go first as
+// their own group at the top, in ui.json order, and they stay in their home
+// group too: a copy, not a move, so the other groups do not look short.
 func (m *uiModel) rows() []row {
 	matched := m.matched()
 	byGroup := map[string][]State{}
@@ -1193,9 +1126,8 @@ func (m *uiModel) rows() []row {
 	return out
 }
 
-// orderedFavorites is the favorites group in the order ui.json lists them: the
-// order they were pinned in, changed by alt+arrows. An entity that is not in the
-// current list - filtered away, or not one of ours any more - is simply skipped.
+// orderedFavorites is the favorites group in the order ui.json lists them;
+// entities not in the current list are skipped.
 func (m *uiModel) orderedFavorites(matched []State) []State {
 	byID := make(map[string]State, len(matched))
 	for _, s := range matched {
@@ -1255,9 +1187,7 @@ func (m *uiModel) groupOrder(states []State) []string {
 	return out
 }
 
-// groupKey is what a group header is named for the current view. The default
-// view groups by domain, the same thing the list has always done; "areas"
-// groups by the entity's area, and "states" groups by the current state.
+// groupKey is how an entity is named into a group for the current view.
 func (m *uiModel) groupKey(s State) string {
 	switch m.currentView() {
 	case viewAreas:
@@ -1273,9 +1203,9 @@ func (m *uiModel) groupKey(s State) string {
 	return domain(s.EntityID)
 }
 
-// areaName resolves an entity's area: the mapping fetched from Home Assistant
-// first, then an attribute an integration recorded for itself. "unknown" when
-// the entity has no area, which is most of them.
+// areaName resolves an entity's area: the mapping from HA first, then an
+// area attribute an integration recorded; "unknown" when it has none, which
+// is most of them.
 func (m *uiModel) areaName(s State) string {
 	if a := m.areas[s.EntityID]; a != "" {
 		return a
@@ -1292,10 +1222,9 @@ func (m *uiModel) areaName(s State) string {
 	return "unknown"
 }
 
-// currentView is the grouping mode as one of the known values. The field is a
-// plain string so ui.json and a hand-written test can set it directly; anything
-// unrecognised falls back rather than being rejected, because only a hand-edited
-// file can produce one. One switch, and no re-parsing per entity.
+// currentView is the grouping mode as one of the known values; anything
+// unrecognised (only possible from a hand-edited ui.json) falls back to
+// "groups".
 func (m *uiModel) currentView() viewMode {
 	switch viewMode(m.view) {
 	case viewAreas, viewStates, viewFlat:
@@ -1304,9 +1233,7 @@ func (m *uiModel) currentView() viewMode {
 	return viewGroups
 }
 
-// setView switches the grouping mode. An unknown name falls back to "groups"
-// rather than refusing: the only caller that can pass garbage is a hand-edited
-// ui.json, and the flag path validates before it gets here.
+// setView switches the grouping mode; an unknown name falls back to "groups".
 func (m *uiModel) setView(v string) {
 	n, err := parseView(v)
 	if err != nil {
@@ -1389,11 +1316,9 @@ func (m *uiModel) focusHeader(domain string) {
 	m.keepCursorInRange()
 }
 
-// foldDown is what esc does once there is nothing left to close: it shuts the
-// group the cursor is in, or the nearest unfolded one (above first, then below)
-// if the cursor is sitting on an already-folded row, and then steps to the
-// next still-open row. It never opens a group: walking down with repeated
-// presses is what shuts the whole list.
+// foldDown is what esc does once there is nothing left to close: it folds the
+// group the cursor is in, or the nearest unfolded one (above, then below), and
+// steps to the next still-open row. It never opens a group.
 func (m *uiModel) foldDown() {
 	if r, ok := m.rowAt(m.cursor); ok && !m.isFolded(r.domain) {
 		m.setFolded(r.domain, true)
@@ -1432,8 +1357,7 @@ func (m *uiModel) foldDown() {
 }
 
 // afterMove is what every navigation key schedules: a re-read of the row the
-// cursor landed on. While the websocket is subscribed there is nothing to ask
-// for — the next event for that row is already on its way.
+// cursor landed on. Nothing to ask for while the websocket is subscribed.
 func (m *uiModel) afterMove() tea.Cmd {
 	if m.conn != nil {
 		return nil
@@ -1442,13 +1366,10 @@ func (m *uiModel) afterMove() tea.Cmd {
 }
 
 // frame is where the scrolling list sits in the terminal for one draw: the
-// window into rows(), the screen line that window starts on, and the in-view
-// group indicator above it when the list is scrolled past its own group header.
-//
-// Every field is derived from the model rather than stored. View used to write
-// rowTop and winStart back into the model as a side effect and rowAtY read them
-// out again, which put one piece of arithmetic in two places and left a click
-// mapped to whatever the last View happened to have drawn.
+// window into rows(), the screen line the window starts on, and the in-view
+// group indicator when the list is scrolled past its own group header.
+// Derived, never stored: View used to write these back into the model, which
+// left a click mapped to whatever the last View happened to draw.
 type frame struct {
 	start, end int    // the window into rows()
 	rowTop     int    // screen line, counting from 1, that start is drawn on
@@ -1462,11 +1383,9 @@ func (m *uiModel) frame(rows []row) frame {
 	if m.showFilter() {
 		f.rowTop = 4 // ... and the filter input above them
 	}
-	// The title, filter and rule above are drawn outside the window, so they
-	// never scroll away. This keeps the *group* visible too, which the top rule
-	// does not: scrolled deep into a 132-row group there would otherwise be no
-	// indication of what you are looking at. The indicator takes one of the
-	// list's own lines, so the rows below it move down by one.
+	// The title, filter and rule above are drawn outside the window and never
+	// scroll away; this keeps the current group visible too when scrolled
+	// deep. The indicator takes one of the list's own lines.
 	if start < len(rows) && !rows[start].isGroup {
 		f.rowTop++
 		f.group = rows[start].domain
@@ -1476,13 +1395,8 @@ func (m *uiModel) frame(rows []row) frame {
 
 // ---------------------------------------------------------------- mouse
 
-// handleMouse selects a row on click and scrolls on the wheel. Only active with
-// --mouse, because enabling mouse tracking takes the pointer away from terminal
-// text selection.
-//
-// Any movement closes an open sub-menu first: the menu belongs to the row it was
-// opened on, and silently following the cursor would leave it pointing at a
-// different entity.
+// handleMouse selects a row on click and scrolls on the wheel. Any movement
+// closes an open sub-menu first: the menu belongs to the row it was opened on.
 func (m *uiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case msg.Button == tea.MouseButtonWheelUp:
@@ -1505,9 +1419,8 @@ func (m *uiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// rowAtY maps a screen line to a row, using the window this model draws now.
-// A MouseMsg.Y counts from 1 while rowTop counts the lines above the list, so
-// the first drawn row arrives as rowTop+1 - subtract one before indexing.
+// rowAtY maps a screen line to a row. MouseMsg.Y counts from 1 while rowTop
+// counts the lines above the list, hence the -1.
 func (m *uiModel) rowAtY(y int) (int, bool) {
 	rows := m.rows()
 	f := m.frame(rows)
@@ -1555,8 +1468,7 @@ func dropLastRune(s string) string {
 }
 
 // window picks the slice of rows to draw, keeping the cursor centred and
-// clamped at both ends. Derived from state rather than stored, so it is always
-// consistent with the cursor.
+// clamped at both ends.
 func window(cursor, n, height int) (int, int) {
 	if height < 1 {
 		height = 1
@@ -1601,16 +1513,6 @@ func (m *uiModel) View() string {
 	var b strings.Builder
 	rows := m.rows()
 
-	// What the list can reach, not how many rows are on screen: every run starts
-	// with the groups closed, so counting visible entity rows would say 0 on
-	// the frame that most needs the number.
-	shown := len(m.matched())
-	folded := 0
-	for _, r := range rows {
-		if r.isGroup && !m.expanded(r.domain) {
-			folded++
-		}
-	}
 	live := m.liveState()
 	liveStyle := styleDim
 	switch live {
@@ -1628,23 +1530,14 @@ func (m *uiModel) View() string {
 		innerWidth = 20
 	}
 	base := m.client.base
-	// What the list is showing and what the house holds: on an instance where
-	// the default view hides four fifths of the entities, "127/387" is the
-	// difference between a short list and a missing one. Both numbers are
-	// already computed for the list itself.
-	counts := fmt.Sprintf("%d/%d", shown, len(m.states))
-	if folded > 0 {
-		counts += fmt.Sprintf(" · %d folded", folded)
-	}
-	tail := "  ·  " + counts + "  ·  " + live
+	tail := live
 	avail := innerWidth - len([]rune(tail)) - 2
 	if avail < 8 {
 		avail = 8
 	}
 	base = truncate(base, avail)
 
-	header := "  " + styleTitle.Render(base) + styleDim.Render("  ·  ") +
-		styleDim.Render(counts+"  ·  ") + liveStyle.Render(live)
+	header := "  " + styleTitle.Render(base) + styleDim.Render("  ·  ") + liveStyle.Render(live)
 	boxContent := header
 	// A rule above and below turns the single line into a header band, so it
 	// reads as a header rather than a stray line of text.
@@ -1667,9 +1560,8 @@ func (m *uiModel) View() string {
 		b.WriteString(styleDim.Render(msg) + "\n")
 	}
 
-	// Where the list sits in this frame. The frame carries the lines reserved
-	// around it too, so the scroll window and the click mapping cannot disagree
-	// about which rows are on screen.
+	// Where the list sits in this frame, so the scroll window and the click
+	// mapping agree about which rows are on screen.
 	f := m.frame(rows)
 
 	if f.group != "" {
@@ -1719,26 +1611,20 @@ func (m *uiModel) liveState() string {
 	}
 }
 
-// panelHeight is what a panel (the action sub-menu, the details) may take from
-// the scrolling body: half of it. The list keeps the rest, so the row you are
-// looking at stays visible in context and the frame can never overflow — the
-// panel and the rows are drawn into the same space, so their sizes have to be
-// decided against each other rather than independently.
-// showFilter reports whether the filter input is drawn. It stays visible
-// whenever there is text in it or while a search is in progress, so the
-// user can refine; an idle, empty screen shows no input at all.
+// panelHeight is what a panel (sub-menu, details) may take from the body: half
+// of it. The panel and the rows are drawn into the same space, so their sizes
+// have to be decided against each other, not independently.
+func (m *uiModel) panelHeight() int { return max(1, (m.height-m.chromeLines())/2) }
+
+// showFilter reports whether the filter input is drawn: whenever there is text
+// in it or a search is in progress.
 func (m *uiModel) showFilter() bool {
 	return m.searching || m.filter != ""
 }
 
-// chromeLines counts the lines View draws outside the scrolling list. It drops
-// one when the filter input is hidden, matching what the method writes.
-//
-// top rule(1) + header(1) + filter(1) + group indicator(1) + "… more"(1) +
-// closing rule(1) + status(1) + help(1); the filter line is optional. The
-// group indicator and "… more" only appear when the list is scrolled or
-// overflows, so this is the worst case and the view can never outgrow the
-// terminal.
+// chromeLines counts the lines View draws outside the scrolling list: rules,
+// header, filter, group indicator, "… more", status, help. The worst case, so
+// the view can never outgrow the terminal.
 func (m *uiModel) chromeLines() int {
 	n := 9
 	if !m.showFilter() {
@@ -1746,8 +1632,6 @@ func (m *uiModel) chromeLines() int {
 	}
 	return n
 }
-
-func (m *uiModel) panelHeight() int { return max(1, (m.height-m.chromeLines())/2) }
 
 // listHeight is the room left for rows once the frame and any panel are paid
 // for. Must match what chromeLines() counts. It is clamped at one so a short
@@ -1758,8 +1642,7 @@ func (m *uiModel) listHeight() int {
 }
 
 // termWidth is the terminal width, or defaultWidth before the first
-// WindowSizeMsg. Tests that do not set width get the same layout they always
-// had, and no terminal width means nothing is clipped or budgeted.
+// WindowSizeMsg.
 func (m *uiModel) termWidth() int {
 	if m.width <= 0 {
 		return defaultWidth
@@ -1767,26 +1650,20 @@ func (m *uiModel) termWidth() int {
 	return m.width
 }
 
-// clip shortens a rendered line to what the terminal can show, counting runes.
-// It is a no-op when the width is unknown, so a test-built model keeps its
-// natural layout. Called on plain text, never on a styled string.
+// clip shortens a rendered line to what the terminal can show. Called on
+// plain text only, never on a styled string.
 func (m *uiModel) clip(s string, indent int) string {
 	return truncate(s, max(8, m.termWidth()-indent))
 }
 
-// ruleWidth is how wide the horizontal rules may be. The old hardcoded 72
-// wrapped on a 60-column terminal, and a wrapped rule is a lost line: the
-// frame grows past the height and bubbletea keeps the last height lines, so
-// the title and filter scroll off the top.
+// ruleWidth is how wide the horizontal rules may be (a hardcoded width wraps
+// on a narrow terminal and scrolls the header off the top).
 func (m *uiModel) ruleWidth() int {
 	return max(16, m.termWidth()-4)
 }
 
-// panelLines is the one panel that draws under the cursor row. The sub-menu
-// wins when both are open, which keeps the frame arithmetic honest: each panel
-// is sized against half the body, so two at once would each take a half and
-// leave the list nothing. Losing the menu to ^D and back is free, because no
-// state is dropped — the details are still there when the menu closes.
+// panelLines is the one panel that draws under the cursor row; the sub-menu
+// wins when both would be open, or the list would be left nothing.
 func (m *uiModel) panelLines() []string {
 	if l := m.menuLines(); l != nil {
 		return l
@@ -1826,12 +1703,8 @@ func (m *uiModel) line(r row, selected bool) string {
 		if r.on > 0 {
 			summary += " " + styleOn.Render(fmt.Sprintf("%d on", r.on))
 		}
-		// No position marker: the header used to carry "·3" to say a group was
-		// pinned to the top, which was worth showing when only a few were. Now
-		// group_order holds every domain, so every group got a number and
-		// "light ·6" said nothing the order of the list does not already say.
-		// The favorites group is the one header that is not a domain, an area or
-		// a state, so it keeps its star and says what it is.
+		// The favorites group is the one header that is not a domain, an
+		// area or a state, so it keeps its star.
 		name := r.domain
 		if r.domain == favoritesGroup {
 			name = "★ " + name
@@ -1854,10 +1727,9 @@ func (m *uiModel) line(r row, selected bool) string {
 	if selected {
 		stateStyle = nameStyle
 	}
-	// An entity with no friendly_name has no name to show, so the name cell
-	// stays empty and the id stands in the id column - exactly as `has list`
-	// renders it. Falling back to the id inside the name column put ids at two
-	// different indents and made light.workspace_light read like a name.
+	// An entity with no friendly_name has empty name cell and the id in the
+	// id column, as `has list` does; a fallback inside the name column put
+	// ids at two indents and ids read like names.
 	name, id := friendlyName(&s), "  "+s.EntityID
 	if m.cfg.isFavorite(s.EntityID) {
 		name = "★ " + name
@@ -1867,10 +1739,8 @@ func (m *uiModel) line(r row, selected bool) string {
 	if selected && len(acts) > 0 {
 		hint = fmt.Sprintf(" %d acts", len(acts))
 	}
-	// The row has to fit the terminal. After the fixed columns (indent,
-	// pointer, state, gaps) the remainder is split between the name, the id
-	// and the hint, in that order of priority: the name shrinks first, then
-	// the id, and the hint is last.
+	// The row has to fit the terminal: after the fixed columns, the remainder
+	// is split between name, id and hint, in that priority.
 	budget := m.termWidth() - entityGutter
 	if budget < 16 {
 		budget = 16
@@ -1960,12 +1830,8 @@ func (m *uiModel) detailLines() []string {
 
 	out := []string{styleDim.Render("       " + s.EntityID + " · " + pad(s.State, 13) +
 		" changed " + timestamp(s.LastChanged))}
-	// The budget is half the body: listHeight already subtracts this panel, and
-	// asking it here would be a loop.
 	room := m.panelHeight() - 1
-	// Battery first, when there is one. It is the attribute people open this
-	// panel to see, and buried in an alphabetical dump of twenty others it is
-	// the one they do not find.
+	// Battery first: it is the attribute people open this panel for.
 	if b, ok := s.Attributes["battery_level"]; ok {
 		out = append(out, "       "+styleKey.Render(pad("battery", 22))+batteryText(b))
 	}
@@ -1980,9 +1846,8 @@ func (m *uiModel) detailLines() []string {
 	return out
 }
 
-// batteryText renders a battery level the way it is meant to be read. Home
-// Assistant reports a percentage, but an integration sending a fraction should
-// not be shown as 1%.
+// batteryText renders a battery level; a fraction from a quirky integration
+// is not shown as "1%".
 func batteryText(v any) string {
 	switch n := v.(type) {
 	case float64:
@@ -2016,16 +1881,13 @@ func attributeValue(v any) string {
 	}
 }
 
-// helpPopup is the full keyboard shortcut reference. It is drawn as a box over
-// the list, not inside it: as a panel it was spliced in under the cursor row,
-// so on a group header it read as a help screen the group had swallowed and
-// every row below it jumped. An overlay costs the list nothing.
+// helpPopup is the full keyboard shortcut reference, drawn as a box over the
+// list: as a panel it was spliced under the cursor row and every row below it
+// jumped.
 func (m *uiModel) helpPopup() []string {
 	if !m.help {
 		return nil
 	}
-	// Replaced rather than added: an 18-entry box is truncated to "… 2 more" on a
-	// 24-line terminal, so a key added here is a key nobody sees.
 	items := []struct {
 		key  string
 		desc string
@@ -2048,10 +1910,8 @@ func (m *uiModel) helpPopup() []string {
 		{"^C", "quit"},
 	}
 
-	// A box taller than the terminal would push the frame past m.height and
-	// scroll the header off the top, so the list of keys is trimmed to what
-	// the box can hold. room pays for the two borders and the title. How to
-	// close it is the help line under the box, which is never covered.
+	// Trimmed to what the box can hold: taller than the terminal would scroll
+	// the header off the top. room pays for the two borders and the title.
 	descW := max(8, m.termWidth()-21)
 	room := max(1, m.height-3)
 	out := []string{styleTitle.Render("keyboard shortcuts:")}
@@ -2066,17 +1926,13 @@ func (m *uiModel) helpPopup() []string {
 }
 
 // overlay draws box in the middle of an already-rendered view. It replaces
-// lines rather than adding them: an overlay that grew the view would be one
-// line too tall, and bubbletea answers that by scrolling the title and filter
-// off the top. Over-long rows fall off the bottom, which is what a popup on a
-// short terminal should do.
+// lines rather than adding them: an overlay that grew the view would scroll
+// the title off the top.
 func overlay(view string, box []string, width, height int) string {
 	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
-	// The box is centred in the terminal, not in whatever the list happened to
-	// draw. With every group closed the view is seven lines, and a box centred
-	// in seven loses its own bottom half. Padding to the terminal height draws
-	// nothing new - bubbletea blanks those lines anyway - and cannot push the
-	// header off the top, because the view never grows past m.height.
+	// Pad to the terminal height, so the box is centred in the terminal and
+	// not in whatever the list happened to draw. Draws nothing new; bubbletea
+	// blanks those lines anyway.
 	for len(lines) < height {
 		lines = append(lines, "")
 	}
@@ -2103,8 +1959,8 @@ func overlay(view string, box []string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
-// padTo pads a styled string to n visible columns. pad() counts runes, so on a
-// coloured line it would count the escape codes as text.
+// padTo pads a styled string to n visible columns; pad() would count the
+// escape codes as text.
 func padTo(s string, n int) string {
 	if w := lipgloss.Width(s); w < n {
 		return s + strings.Repeat(" ", n-w)

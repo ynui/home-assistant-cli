@@ -43,8 +43,8 @@ func cmdLogin(args []string) error {
 	if url == "" {
 		url = prompt("Home Assistant URL", "http://homeassistant.local:8123")
 	}
-	// An existing token is offered as a default rather than reused silently:
-	// re-running `has login` is how you replace a token that has been revoked.
+	// An existing token is offered as a default, not reused silently:
+	// re-running `has login` is how you replace a revoked token.
 	token, err = promptSecret("Long-lived token", token)
 	if err != nil {
 		return err
@@ -64,9 +64,7 @@ func login(url, token string) error {
 		return err
 	}
 	if err := c.ping(); err != nil {
-		// A bad token is the common case, so point at the fix. newAPIError
-		// already classified it as exitAuth; searching the message for "401"
-		// was a second, weaker way to ask the same question.
+		// 401 is the common case: point at the fix.
 		if exitCode(err) == exitAuth {
 			return fmt.Errorf("%s rejected the token: %w\n  generate a new one at <url>/profile, then run `has login`", url, err)
 		}
@@ -128,8 +126,8 @@ func cmdList(args []string) error {
 		return err
 	}
 
-	// Home Assistant returns states in internal order, which looks random.
-	// Sorting by entity_id groups related entities and domains together.
+	// HA returns states in an internal order that looks random; sorting by
+	// entity id groups domains together.
 	by, err := stateSort(*sortBy)
 	if err != nil {
 		return err
@@ -140,8 +138,7 @@ func cmdList(args []string) error {
 			matched[i], matched[j] = matched[j], matched[i]
 		}
 	}
-	// Counts come from the full match, not the truncated view, so a group
-	// header never claims a domain is smaller than it is.
+	// Counts come from the full match, before --limit truncates.
 	counts := domainCounts(matched)
 	if *limit > 0 && len(matched) > *limit {
 		matched = matched[:*limit]
@@ -153,8 +150,7 @@ func cmdList(args []string) error {
 		}
 		return emitJSON(matched)
 	}
-	// Show the timestamp that was actually sorted on, so the column and the
-	// ordering never disagree. A text sort has no meaningful time column.
+	// Show the timestamp sorted on, so the column and the order always agree.
 	col := ""
 	switch *sortBy {
 	case "changed":
@@ -174,8 +170,8 @@ func cmdList(args []string) error {
 		rows = append(rows, []string{s.EntityID, friendlyName(&s), s.State, when})
 	}
 
-	// Only under the default sort: grouping by domain under a time or text
-	// sort would imply an order the rows are not in.
+	// Group headers only under the default sort: under any other sort the
+	// rows are not in domain order.
 	if *sortBy == "entity" {
 		rows = withGroupHeaders(rows, counts)
 	}
@@ -185,14 +181,10 @@ func cmdList(args []string) error {
 		rows)
 }
 
-// briefState is what `list --brief -o json` emits: the three columns the table
-// already shows, and nothing else.
-//
-// The full state is mostly things a reader did not ask for — attributes are
-// half the payload on a real instance, and every row carries two ISO
-// timestamps that differ by microseconds. `list -o json` keeps them because
-// "everything the server said" is a fair thing to want; this is the shape for
-// asking "which lights are on".
+// briefState is what `list --brief -o json` emits: the table's three columns,
+// nothing else. The full state is mostly unread attributes and two timestamps
+// that differ by microseconds; `list -o json` keeps it as "everything the
+// server said".
 type briefState struct {
 	EntityID string `json:"entity_id"`
 	Name     string `json:"name"`
@@ -208,8 +200,8 @@ func briefStates(states []State) []briefState {
 	return out
 }
 
-// withGroupHeaders inserts a "domain (n)" line wherever the domain changes.
-// Counts come from counts so they describe the whole domain, not just the rows
+// withGroupHeaders inserts a "domain (n)" line wherever the domain changes,
+// counting from counts so they describe the whole domain, not just the rows
 // that survived --limit.
 func withGroupHeaders(rows [][]string, counts map[string]int) [][]string {
 	out := make([][]string, 0, len(rows)+8)
@@ -288,8 +280,7 @@ func cmdGet(args []string) error {
 		[][]string{{s.EntityID, friendlyName(&s), s.State, timestamp(s.LastChanged)}})
 }
 
-// stateSort returns a "less" function for a --sort key. The comparators take
-// pointers: State is a hundred bytes and this runs once per comparison.
+// stateSort returns a "less" function for a --sort key.
 func stateSort(key string) (func(a, b *State) bool, error) {
 	switch key {
 	case "entity":
@@ -307,8 +298,7 @@ func stateSort(key string) (func(a, b *State) bool, error) {
 	}
 }
 
-// friendlyName takes a pointer: State is a hundred bytes with a map in it,
-// and this is called from sort comparators, once per comparison.
+// friendlyName takes a pointer: it is called from sort comparators.
 func friendlyName(s *State) string {
 	if v, ok := s.Attributes["friendly_name"].(string); ok {
 		return v
@@ -339,8 +329,7 @@ func matchAll(fields, patterns []string) bool {
 // ---------------------------------------------------------------- service calls
 
 // cmdCall is both `has call domain.service k=v` and, when name is set, the
-// entity-list form behind on/off/toggle. The on/off/toggle form resolves its
-// arguments as selectors; call keeps literal ids as the escape hatch.
+// entity-list form behind on/off/toggle.
 func cmdCall(args []string, name, dom, service string) error {
 	fs := newFlagSet(name)
 	all := fs.Bool("all", false, "act on every entity a group or fuzzy name matches")
@@ -384,17 +373,16 @@ func cmdCall(args []string, name, dom, service string) error {
 		if err != nil {
 			return err
 		}
-		// Only report the blast radius when it was asked for; naming two
-		// entity ids is not a surprise worth a line.
+		// Warn about the blast radius only when --all was used implicitly.
 		if *all && len(matched) > 1 {
 			fmt.Fprintf(os.Stderr, "%s will act on %d entities\n", name, len(matched))
 		}
 		data = map[string]any{"entity_id": entityIDs(matched)}
 	}
 
-	// Everything above resolves; nothing below has fired. A dry run stops here,
-	// so it costs no extra request and still reports the ids the selector
-	// actually matched, which is the question it exists to answer.
+	// Everything above resolves; nothing below has fired. A dry run stops
+	// here, so it costs no extra request and still shows the ids the selector
+	// really matched.
 	if *dry {
 		return reportDryRun(dom, service, data)
 	}
@@ -403,10 +391,8 @@ func cmdCall(args []string, name, dom, service string) error {
 	if err != nil {
 		return err
 	}
-	// Home Assistant reports the resulting states with the call, so say what
-	// happened rather than making the user follow up with `has get`. This is
-	// the command's output and goes to stdout; stderr keeps the warnings, so
-	// `has on kitchen > what-happened` is a complete record.
+	// The response carries the resulting states, so print what happened.
+	// This is stdout; warnings stay on stderr for scripts.
 	if *flagOutput == "json" {
 		return emitJSON(changed)
 	}
@@ -420,10 +406,8 @@ func cmdCall(args []string, name, dom, service string) error {
 	return nil
 }
 
-// reportDryRun prints the service and the payload it would be sent, without
-// calling anything. The payload is printed as it stands rather than assuming
-// its values are entity ids: entity_id is not always an entity id, and the
-// resolved value is the honest answer.
+// reportDryRun prints the service and the payload it would be sent. Values are
+// printed as they stand: the resolved form is the honest answer.
 func reportDryRun(dom, service string, data map[string]any) error {
 	full := dom + "." + service
 	if *flagOutput == "json" {
@@ -441,9 +425,8 @@ func reportDryRun(dom, service string, data map[string]any) error {
 	return nil
 }
 
-// payloadValue renders one payload value: the string a key=value argument
-// produced, or the comma-joined ids a selector resolved to — which is the form
-// that can be pasted straight back into another call.
+// payloadValue renders one payload value; []string values are comma-joined, so
+// the output can be pasted straight back into another call.
 func payloadValue(v any) string {
 	switch t := v.(type) {
 	case string:
@@ -521,9 +504,9 @@ func cmdHistory(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Same selector rules as every other command. Sending the token verbatim
-	// used to make Home Assistant answer with an empty list, so a typo or a
-	// fuzzy name looked exactly like an entity that never changed.
+	// Selectors resolve like every other command. Sending the token verbatim
+	// used to make HA answer with an empty list, so a fuzzy name looked like
+	// an entity that never changed.
 	matched, err := resolve(all, rest, true)
 	if err != nil {
 		return err
@@ -543,8 +526,6 @@ func cmdHistory(args []string) error {
 	rows := make([][]string, 0, len(states))
 	prev := ""
 	for _, s := range states {
-		// A run of one entity's changes reads better without the id repeated
-		// on every line; the state column is what you are reading.
 		id := s.EntityID
 		if id == prev {
 			id = ""
@@ -560,11 +541,9 @@ func cmdHistory(args []string) error {
 
 // ---------------------------------------------------------------- watch
 
-// cmdWatch tails state changes off the websocket: the live answer to what
-// logbook answers about yesterday. Selectors narrow it the same way every other
-// read does, and there is nothing to fall back to - a tail with no socket has no
-// list to keep fresh, so a refused connection is an error rather than a slower
-// mode.
+// cmdWatch tails state changes off the websocket. There is no polling
+// fallback: a tail with no socket has nothing to keep fresh, so a refused
+// connection is an error.
 func cmdWatch(args []string) error {
 	fs := newFlagSet("watch")
 	rest, err := parseArgs(fs, args)
@@ -575,8 +554,6 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return err
 	}
-	// A nil filter watches the whole house; anything else is a set of entity
-	// ids resolved once, up front, so a selector is never re-resolved per event.
 	var only map[string]bool
 	if len(rest) > 0 {
 		all, err := c.states()
@@ -587,6 +564,7 @@ func cmdWatch(args []string) error {
 		if err != nil {
 			return err
 		}
+		// Resolved once, up front; never re-resolved per event.
 		only = map[string]bool{}
 		for _, id := range entityIDs(matched) {
 			only[id] = true
@@ -599,12 +577,10 @@ func cmdWatch(args []string) error {
 		if err == nil || ctx.Err() != nil {
 			return nil
 		}
-		// A server that was never reachable is a dead server, not a blip, so it
-		// gets the few tries a refused handshake gets. One that went away
-		// mid-tail keeps the tail: a house that restarts should not need a
-		// restart.
+		// A server that was never reachable gets the few tries a refused
+		// handshake gets; one that dropped mid-tail keeps reconnecting.
 		if connected {
-			tries = 0 // it was up: this drop is not part of a server that is down
+			tries = 0
 		} else if tries+1 >= wsConnectTries {
 			return err
 		}
@@ -621,14 +597,13 @@ func cmdWatch(args []string) error {
 	}
 }
 
-// watchEntityWidth is the entity column of `has watch`. Long enough for the
-// longest id a real house produces, truncated with the usual ellipsis beyond it.
+// watchEntityWidth is the entity column of `has watch`, wide enough for real
+// ids; longer names are truncated.
 const watchEntityWidth = 44
 
-// watchChange is one state_changed event, in the shape the wire sends it. The
-// two states are pointers because null is not an edge case here: new_state is
-// null when the entity was removed, and old_state is null the first time an
-// entity ever takes a state.
+// watchChange is one state_changed event. The two states are pointers because
+// null is normal data here: new_state is null when the entity was removed,
+// old_state is null on an entity's first state after startup.
 type watchChange struct {
 	EntityID string `json:"entity_id"`
 	OldState *State `json:"old_state"`
@@ -643,9 +618,8 @@ type watchLine struct {
 	To     string    `json:"to"`
 }
 
-// watchPrinter turns the event stream into the lines a tail prints. Only it and
-// cmdWatch know what a change looks like on screen, so the socket side stays a
-// stream of raw events.
+// watchPrinter turns the event stream into printed lines, so the socket side
+// stays a stream of raw events.
 func watchPrinter(only map[string]bool) func(eventType string, data json.RawMessage) {
 	first := true
 	return func(eventType string, data json.RawMessage) {
@@ -662,9 +636,7 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 		line := watchLine{
 			When:   time.Now(),
 			Entity: ch.EntityID,
-			// `unset` and `removed` are Home Assistant's own words for the two
-			// ends of an entity's life, and saying so beats an empty column
-			// that reads like a bug.
+			// HA's own words for the two ends of an entity's life.
 			From: "unset",
 			To:   "removed",
 		}
@@ -673,8 +645,8 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 		}
 		if ch.NewState != nil {
 			line.To = ch.NewState.State
-			// The server's own timestamp, not the moment this line was written:
-			// a reconnect can deliver an event that happened minutes ago.
+			// The server's timestamp, not write time: a reconnect can deliver
+			// an old event.
 			line.When = ch.NewState.LastUpdated
 		} else if ch.OldState != nil {
 			line.When = ch.OldState.LastChanged
@@ -695,8 +667,8 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 			fmt.Fprintln(os.Stdout, "  "+pad("WHEN", len(logbookFormat))+"  "+
 				pad("ENTITY", watchEntityWidth)+"  CHANGE")
 		}
-		// pad(), not a table: a tail arrives one row at a time, so tabwriter
-		// would never see the row after this one to align against.
+		// pad(), not a table: rows arrive one at a time and tabwriter would
+		// never see the next row to align against.
 		fmt.Fprintln(os.Stdout, pad(timestampSec(line.When), len(logbookFormat))+"  "+
 			pad(line.Entity, watchEntityWidth)+"  "+line.From+" → "+line.To)
 	}
@@ -704,13 +676,9 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 
 // ---------------------------------------------------------------- areas
 
-// cmdAreas groups entities by the area Home Assistant has them in. It is the
-// same grouping the TUI's "areas" view shows, over the same one template
-// render - Home Assistant keeps areas out of /api/states, so this is the only
-// way to ask.
-//
-// Most entities have no area and are not listed: an "unknown" row holding 300
-// entities answers nothing.
+// cmdAreas groups entities by area. Like the TUI's areas view, it reads the
+// one template render: HA keeps areas out of /api/states. Entities with no
+// area are not listed; an "unknown" row answers nothing.
 func cmdAreas(args []string) error {
 	fs := newFlagSet("areas")
 	rest, err := parseArgs(fs, args)
@@ -736,10 +704,8 @@ func cmdAreas(args []string) error {
 	default:
 		matched, err = resolve(all, rest, true)
 		if err != nil {
-			// A token that names no entity may name an area. This command is
-			// grouped by area and the area is what it prints, so `has areas
-			// kitchen` should mean the kitchen rather than fail on a house with
-			// no entity called kitchen.
+			// A token that names no entity may name an area instead;
+			// `has areas kitchen` should mean the kitchen.
 			for _, s := range all {
 				if a := areas[s.EntityID]; a != "" && matchAll([]string{a}, rest) {
 					matched = append(matched, s)
@@ -790,10 +756,9 @@ type areaCount struct {
 
 // ---------------------------------------------------------------- logbook
 
-// cmdLogbook answers "what just happened", for a whole house or for whatever
-// the selectors match. `history` is the same idea narrowed to entities you name
-// and a window you choose; the logbook is what Home Assistant recorded about
-// everything, including automations and scripts that have no state of their own.
+// cmdLogbook answers "what just happened" for the whole house, including
+// automations and scripts that have no state; `history` is the same idea
+// narrowed to named entities and a window.
 func cmdLogbook(args []string) error {
 	fs := newFlagSet("logbook")
 	day := fs.String("day", "today", "which day: today, yesterday or YYYY-MM-DD")
@@ -810,8 +775,7 @@ func cmdLogbook(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Same selector rules as every other command, so `has logbook kitchen`
-	// means what `has list kitchen` means. A read, so many matches are fine.
+	// Selectors resolve like every other command.
 	var targets []string
 	if len(rest) > 0 {
 		states, err := c.states()
@@ -840,8 +804,6 @@ func cmdLogbook(args []string) error {
 	rows := make([][]string, 0, len(entries))
 	prev := ""
 	for _, e := range entries {
-		// A run of one entity's changes reads better without the id repeated on
-		// every line; what changed is the column being read.
 		id := e.EntityID
 		if id == prev {
 			id = ""
@@ -900,8 +862,6 @@ func cmdServices(args []string) error {
 	}
 	rows := make([][]string, 0, len(out))
 	for _, s := range out {
-		// Targets are what decide whether `has call` can aim this service at
-		// anything, and the registry already parsed them.
 		rows = append(rows, []string{s.Domain, s.Name, strings.Join(s.entityDomains(), ","), s.Description})
 	}
 	return table(os.Stdout,
@@ -913,14 +873,9 @@ func cmdServices(args []string) error {
 // ---------------------------------------------------------------- template
 
 // cmdTemplate renders a Jinja template on the server and prints the result
-// exactly as it came back. This is the same endpoint `has areas` reads, and the
-// reason it exists is that a template is the only way to ask Home Assistant a
-// question it has no endpoint for - what a sensor's unit says, what a script
-// would return, whether a condition still holds.
-//
-// The output is deliberately not wrapped. A template can render a number, a
-// yaml document or one word, and -o json says nothing about which: wrapping
-// would break the `has template ... | jq` that makes it worth having.
+// exactly as it came back - the only way to ask HA a question it has no
+// endpoint for. The output is deliberately not wrapped: a template can render
+// a number, a yaml document or one word, and wrapping would break `| jq`.
 func cmdTemplate(args []string) error {
 	fs := newFlagSet("template")
 	rest, err := parseArgs(fs, args)
@@ -929,8 +884,7 @@ func cmdTemplate(args []string) error {
 	}
 	tpl := strings.Join(rest, " ")
 	if tpl == "" {
-		// No arguments means stdin, which is what makes a template usable in a
-		// pipe or from an editor buffer without quoting it for the shell twice.
+		// No arguments means stdin, so a template can be piped in.
 		b, err := io.ReadAll(stdin)
 		if err != nil {
 			return err
@@ -959,13 +913,12 @@ func isTTY() bool {
 	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
 		return false
 	}
-	// ModeCharDevice is also true for /dev/null. stty is the ioctl test that
-	// does not need a dependency.
+	// ModeCharDevice is also true for /dev/null; stty is the real test.
 	return stty("-g") == nil
 }
 
-// stty must be given os.Stdin explicitly: os/exec wires a child's stdin to
-// /dev/null when Cmd.Stdin is nil, which would make every call fail.
+// stty must be given os.Stdin explicitly: os/exec wires a nil Stdin to
+// /dev/null, which makes every call fail.
 func stty(args ...string) error {
 	cmd := exec.Command("stty", args...)
 	cmd.Stdin = os.Stdin
@@ -991,10 +944,9 @@ func prompt(label, def string) string {
 	return line
 }
 
-// promptSecret reads a line without echoing it. stty is the native tool here;
-// a terminal library would be the only dependency in the project. If we cannot
-// turn off echo we refuse rather than print the token in cleartext. Echo is
-// restored on every exit path so a Ctrl-C cannot leave the terminal mute.
+// promptSecret reads a line without echoing it (stty; no terminal library).
+// If echo cannot be turned off it refuses rather than print the token in
+// cleartext; echo is restored on every exit path.
 func promptSecret(label, def string) (string, error) {
 	if def != "" {
 		fmt.Fprintf(os.Stderr, "%s [press enter to keep current]: ", label)

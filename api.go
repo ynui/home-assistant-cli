@@ -30,14 +30,13 @@ type State struct {
 type ServiceField struct {
 	Description string `json:"description"`
 	Example     any    `json:"example"`
-	// Required marks arguments a service cannot be called without. We never
-	// offer an action that needs one, because we have nothing to pass.
+	// Required: the service cannot be called without it. Services that need
+	// one are never offered as actions, because we have nothing to pass.
 	Required bool `json:"required"`
 }
 
-// ServiceTarget lists the entity domains a service can be aimed at. It is nil
-// for services that take no entity, which is how we tell "script.mute_stereo"
-// (global) apart from "script.turn_on" (targets script entities).
+// ServiceTarget lists the entity domains a service can be aimed at. Nil for
+// services that take no entity.
 type ServiceTarget struct {
 	Entity []struct {
 		Domain []string `json:"domain"`
@@ -66,9 +65,8 @@ func (s Service) entityDomains() []string {
 	return out
 }
 
-// ServerConfig is the part of /api/config that is worth reading. The rest of
-// the response - time zone, components, unit system - is not used by anything
-// here, so it is not decoded.
+// ServerConfig is the part of /api/config worth reading; the rest is unused
+// and not decoded.
 type ServerConfig struct {
 	Version      string `json:"version"`
 	LocationName string `json:"location_name"`
@@ -96,9 +94,7 @@ func (c *Client) do(method, path string, body any) ([]byte, error) {
 		}
 		rdr = bytes.NewReader(b)
 	}
-	// The program-wide ctx, so ^C stops a request in flight instead of leaving
-	// it to time out: --timeout is thirty seconds by default and nobody wants
-	// to wait for it after pressing ^C.
+	// ctx is the program-wide one, so ^C cancels a request in flight.
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rdr)
 	if err != nil {
 		return nil, err
@@ -123,18 +119,15 @@ func (c *Client) do(method, path string, body any) ([]byte, error) {
 	return raw, nil
 }
 
-// newAPIError keeps Home Assistant's own message, so callers can print it
-// verbatim. There is nothing to branch on beyond the status, so it is a plain
-// error rather than a type.
+// newAPIError keeps Home Assistant's own message, so callers print it verbatim.
+// A plain error, because there is nothing to branch on beyond the status.
 func newAPIError(status int, raw []byte) error {
 	var e struct {
 		Message string `json:"message"`
 	}
 	if status == http.StatusUnauthorized {
-		// coded so main can give the 401 its own exit code without the
-		// message changing. ws.go has errBadToken for the same condition on
-		// the socket path; that one is shaped for the TUI's status line, so
-		// the two stay separate.
+		// coded so the 401 gets its own exit code without the message changing.
+		// ws.go has errBadToken for the socket path, shaped for the UI instead.
 		return coded{exitAuth, errors.New("token rejected (401); run `has login` to enter a new one")}
 	}
 	if json.Unmarshal(raw, &e) == nil && e.Message != "" {
@@ -180,8 +173,8 @@ func (c *Client) services() ([]Service, error) {
 	var grouped []struct {
 		Domain   string `json:"domain"`
 		Services map[string]struct {
-			// No Name: the map key is the service name, and it is the one the
-			// call has to send back.
+			// The map key is the service name, and it is what the call sends
+			// back; there is no separate Name field.
 			Description string                  `json:"description"`
 			Fields      map[string]ServiceField `json:"fields"`
 			Target      *ServiceTarget          `json:"target"`
@@ -211,8 +204,8 @@ func (c *Client) services() ([]Service, error) {
 	return out, nil
 }
 
-// state fetches a single entity. The UI uses it to refresh only the row under
-// the cursor, instead of pulling every state on each tick.
+// state fetches one entity. The UI uses it to refresh only the row under the
+// cursor instead of pulling every state on each tick.
 func (c *Client) state(entityID string) (State, error) {
 	var s State
 	b, err := c.do(http.MethodGet, "/api/states/"+url.PathEscape(entityID), nil)
@@ -222,10 +215,9 @@ func (c *Client) state(entityID string) (State, error) {
 	return s, json.Unmarshal(b, &s)
 }
 
-// call fires a service and returns the states it changed: Home Assistant
-// answers a service call with the new state of every entity it touched, so the
-// caller can report what happened instead of assuming it worked. data may be
-// nil for services that take no arguments.
+// call fires a service and returns the states it changed: the response carries
+// the new state of every entity touched, so callers report what happened
+// instead of assuming it worked. data may be nil.
 func (c *Client) call(domain, service string, data map[string]any) ([]State, error) {
 	if data == nil {
 		data = map[string]any{}
@@ -235,9 +227,8 @@ func (c *Client) call(domain, service string, data map[string]any) ([]State, err
 	if err != nil {
 		return nil, err
 	}
-	// A service that changes nothing answers with an empty list. Anything we
-	// cannot read is treated the same: the call itself succeeded, and the
-	// error that matters is the one do() already returned.
+	// A call that changed nothing answers with an empty list; unreadable
+	// answers are treated the same, because the call itself succeeded.
 	var out []State
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, nil
@@ -245,12 +236,10 @@ func (c *Client) call(domain, service string, data map[string]any) ([]State, err
 	return out, nil
 }
 
-// history returns state changes since t, newest last. minimal_response and
-// no_attributes keep the payload small.
+// history returns state changes since t, newest last.
 //
-// The period must be RFC3339, not a Unix epoch: Home Assistant parses this
-// path segment as a datetime string and answers 400 "Invalid datetime" for a
-// bare integer.
+// The period must be RFC3339, not a Unix epoch: HA parses this path segment as
+// a datetime string and answers 400 "Invalid datetime" for a bare integer.
 func (c *Client) history(entities []string, since time.Time) ([]State, error) {
 	if len(entities) == 0 {
 		return nil, errors.New("no entity given")
@@ -292,11 +281,9 @@ func unmarshalStates(b []byte) ([]State, error) {
 	return out, nil
 }
 
-// LogEntry is one row of Home Assistant's logbook: something that happened, and
-// what it was to. The shape is not fixed - a state change records `state`, a
-// script or automation run records `message`, and an entry about something with
-// no entity at all records neither and has no entity_id - so only `when` and
-// `name` are always there. Copied from a real /api/logbook response.
+// LogEntry is one row of the logbook. The shape varies: a state change records
+// `state`, a script or automation run records `message`, and an entry with no
+// entity has neither - so only `when` and `name` are always present.
 type LogEntry struct {
 	When     time.Time `json:"when"`
 	Name     string    `json:"name"`
@@ -314,12 +301,9 @@ func (e LogEntry) what() string {
 	return e.Message
 }
 
-// logbook returns what happened during a day, oldest first, which is the order
-// the endpoint answers in and the order `history` prints in too.
-//
-// The filter is ?entity= and takes a comma-separated list; it is the only way
-// to narrow the day down. The endpoint answers POST with 405, so this is a GET
-// with no request body.
+// logbook returns what happened on one day. The endpoint answers GET with the
+// entries oldest first; ?entity= (comma-separated) is the only filter, and
+// POST is rejected with 405.
 func (c *Client) logbook(day time.Time, entities []string) ([]LogEntry, error) {
 	path := "/api/logbook/" + day.Format("2006-01-02")
 	if len(entities) > 0 {
@@ -336,15 +320,14 @@ func (c *Client) logbook(day time.Time, entities []string) ([]LogEntry, error) {
 	return out, nil
 }
 
-// areasTemplate renders one line per entity that is in an area. Home Assistant
-// does not include area data in /api/states, so a template render is the only
-// way to ask; it accounts for both entity-level and device-level assignments.
+// areasTemplate renders "entity_id\tarea" for every entity with an area. HA
+// keeps area data out of /api/states, so a template render is the only way to
+// ask; it covers entity-level and device-level assignments.
 const areasTemplate = "{% for s in states %}{% set a = area_name(s.entity_id) %}" +
 	"{% if a %}{{ s.entity_id }}\t{{ a }}\n{% endif %}{% endfor %}"
 
-// template renders a Jinja template on the server and returns the result
-// verbatim. The answer is plain text, not JSON: a template can render a number,
-// a yaml document or a word, and the caller asked for exactly that.
+// template renders a Jinja template on the server and returns the answer
+// verbatim; it is plain text, not JSON.
 func (c *Client) template(tpl string) (string, error) {
 	b, err := c.do(http.MethodPost, "/api/template", map[string]string{"template": tpl})
 	if err != nil {

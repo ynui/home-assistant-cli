@@ -1077,21 +1077,15 @@ func TestUIViewFitsTerminal(t *testing.T) {
 	fit("both panels open")
 }
 
-// The header says what the list is showing and what the house holds. On an
-// instance where the default view hides four fifths of the entities, "127/387"
-// is the difference between a short list and a missing one.
+// The header says where the client is pointed and whether it is live/restored.
 func TestUIHeaderCountsEntities(t *testing.T) {
 	m := uiFixture() // 5 entities, one of them read-only
 	m.setStatus("", statusOK)
 	m.defaultFolded = true
 
 	view := stripANSI(m.View())
-	if !strings.Contains(view, "4/5") {
-		t.Errorf("header should count 4 of 5 entities:\n%s", view)
-	}
-	// Two groups, both folded.
-	if !strings.Contains(view, "2 folded") {
-		t.Errorf("header should count the folded groups:\n%s", view)
+	if strings.Contains(view, "4/5") {
+		t.Errorf("header should not carry the entity counts:\n%s", view)
 	}
 	// It counts what the list can reach, so the frame is still 4/5 with every
 	// group closed - counting visible rows would say 0, on the one frame that

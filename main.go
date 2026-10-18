@@ -21,18 +21,17 @@ var (
 	flagOutput  = flag.String("o", "table", "output format: table or json")
 	flagTimeout = flag.Duration("timeout", 30*time.Second, "per-request timeout")
 	flagVersion = flag.Bool("v", false, "print version and exit")
-	// --version is the same flag with a longer name; the stdlib treats them as
-	// different names, so both have to be registered.
+	// The stdlib treats --version and -v as unrelated flags, so both are
+	// registered and checked together in main.
 	flagVersion2 = flag.Bool("version", false, "print version and exit")
 )
 
-// version is set at build time via -ldflags "-X main.version=v0.3.0".
-// Defaults to "dev" for local builds (go run, go build without ldflags).
+// version is set at build time with -ldflags "-X main.version=..."; local
+// builds show "dev".
 var version = "dev"
 
-// ctx is cancelled when the user presses ^C. One context for the whole
-// program, set up by main: an in-flight request stops now instead of waiting
-// out --timeout, and `has watch` leaves its read loop and exits cleanly.
+// ctx is cancelled by ^C, so an in-flight request stops instead of waiting
+// out --timeout, and `has watch` exits cleanly. Set up in main (onInterrupt).
 var ctx = context.Background()
 
 const usageText = `has - a small command-line client for Home Assistant
@@ -147,17 +146,15 @@ func fatal(err error) {
 	os.Exit(exitCode(err))
 }
 
-// onInterrupt makes ^C cancel ctx. It is assigned rather than shadowed, which
-// is why it is a function and not three lines in main.
+// onInterrupt makes ^C cancel ctx.
 func onInterrupt() context.CancelFunc {
 	var stop context.CancelFunc
 	ctx, stop = signal.NotifyContext(ctx, os.Interrupt)
 	return stop
 }
 
-// Exit codes, so a script can tell one failure from another without reading the
-// message. Everything non-zero stays non-zero, so `if has list kitchen; then`
-// behaves as before; what changes is that the reason is machine-readable.
+// Exit codes, so a script knows why a command failed without reading the
+// message.
 const (
 	exitError    = 1 // something went wrong, the message says what
 	exitUsage    = 2 // the command line was wrong
@@ -166,10 +163,8 @@ const (
 	exitNetwork  = 5 // the server could not be reached
 )
 
-// coded is an error that knows which exit code it should produce. Wrapping this
-// way rather than tagging the message keeps two promises at once: a script can
-// tell one failure from another, and every message a user reads is byte for byte
-// what it was before the codes existed.
+// coded is an error wrapped with the exit code it should produce. Wrapping
+// instead of tagging the message keeps the text a user reads unchanged.
 type coded struct {
 	code int
 	err  error
@@ -178,9 +173,8 @@ type coded struct {
 func (e coded) Error() string { return e.err.Error() }
 func (e coded) Unwrap() error { return e.err }
 
-// exitCode maps an error to the code it should exit with. errors.As unwraps, so
-// it still finds the code after Client.do has wrapped the error on the way out
-// of an HTTP call.
+// exitCode maps an error to its exit code. errors.As unwraps wrapped errors,
+// so the code is found even after Client.do wraps it.
 func exitCode(err error) int {
 	var c coded
 	var unreachable *url.Error
@@ -195,13 +189,11 @@ func exitCode(err error) int {
 	return exitError
 }
 
-// newFlagSet gives each subcommand its own parser carrying the global flags,
-// so `has list -o json` works and not only `has -o json list`. The current
-// values become the defaults, so a flag given before the subcommand survives.
-//
-// The output format is checked here rather than in main: this is the parser that
-// sees -o whichever side of the subcommand it was written on, so one check
-// covers `has list -o bogus` as well as `has -o bogus list`.
+// newFlagSet gives each subcommand the global flags, so `has list -o json`
+// works and not only `has -o json list`. The current values become the
+// defaults, so a flag written before the subcommand survives. The output
+// format is checked here because this is the parser that sees -o on either
+// side of the subcommand name.
 func newFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	fs.StringVar(flagURL, "url", *flagURL, "server URL")
@@ -214,8 +206,7 @@ func newFlagSet(name string) *flag.FlagSet {
 	return fs
 }
 
-// checkOutputFormat rejects an output format we cannot produce. It is a
-// function so a test can call it without newFlagSet's fatal on failure.
+// checkOutputFormat rejects an output format we cannot produce.
 func checkOutputFormat() error {
 	if *flagOutput != "table" && *flagOutput != "json" {
 		return coded{exitUsage, fmt.Errorf("bad -o %q: want table or json", *flagOutput)}
@@ -223,17 +214,11 @@ func checkOutputFormat() error {
 	return nil
 }
 
-// parseArgs splits args into flags and positionals before handing them to a
-// subcommand's FlagSet. The stdlib parser stops at the first positional, which
-// would silently ignore `has history light.x --since 5m`.
-//
-// It walks the list in order instead of splitting it once: each run of flags
-// goes to the FlagSet, each positional is kept where it was written, and the
-// two come back interleaved. The order matters - `has call` reads rest[0] as the
-// service to call - and it used not to survive a bool flag, which pulled the
-// following positional into the flag list and pushed it to the front.
-//
-// `--` still ends flag parsing: everything after it is positional.
+// parseArgs splits args into flags and positionals before the FlagSet sees
+// them. The stdlib parser stops at the first positional, which would silently
+// ignore `has history light.x --since 5m`, so it parses flags run by run and
+// keeps each positional where it was written. The order matters: `has call`
+// reads rest[0] as the service name. `--` still ends flag parsing.
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var rest []string
 	for {
@@ -255,10 +240,9 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// endOfFlags returns the index of the first argument that is not a flag: the
-// end of the list, a bare `--`, or anything not starting with a dash. A flag
-// written as `-flag value` counts its value too, so `-limit 5` is two
-// arguments rather than a flag and a positional.
+// endOfFlags returns the index of the first non-flag argument: the end of the
+// list, a bare `--`, or anything not starting with a dash. A flag of the form
+// `-flag value` counts its value too, so `-limit 5` is two arguments.
 func endOfFlags(fs *flag.FlagSet, args []string) int {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -272,24 +256,19 @@ func endOfFlags(fs *flag.FlagSet, args []string) int {
 	return len(args)
 }
 
-// takesValue reports whether a flag needs the next argument as its value. The
-// stdlib bool flags answer this themselves, and that is the whole point: a bool
-// does not, so swallowing whatever followed one put `entity_id=kitchen` in
-// front of the service name in `has call light.turn_on --all entity_id=kitchen`,
-// and dropped every flag written after it - the parse had already stopped.
+// takesValue reports whether a flag needs the next argument as its value.
+// Bool flags do not, so they do not swallow the positional that follows.
 func takesValue(fs *flag.FlagSet, name string) bool {
 	f := fs.Lookup(strings.TrimLeft(name, "-"))
 	if f == nil {
-		return true // unknown flag: leave the complaint to Parse
+		return true // unknown flag: let Parse produce the error
 	}
 	b, ok := f.Value.(interface{ IsBoolFlag() bool })
 	return !ok || !b.IsBoolFlag()
 }
 
 // emitJSON writes one json document to stdout. HTML escaping is off because
-// every consumer of this output is jq or an agent, not a browser: an entity
-// called "Hall & Stairs" should come back as itself and not as "Hall \u0026
-// Stairs".
+// the consumers are jq and scripts, not browsers.
 func emitJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -297,18 +276,15 @@ func emitJSON(v any) error {
 	return enc.Encode(v)
 }
 
-// timeFormat drops the seconds. A one-minute resolution is enough to read at a
-// glance; -o json keeps the full ISO timestamp for anything finer.
+// timeFormat drops seconds; -o json keeps the full timestamp.
 const timeFormat = "2006-01-02 15:04"
 
-// logbookFormat keeps them. A day of logbook holds changes inside a single
-// minute - one presence sensor managed 847 of them in a day on the house this
-// was written against - and a column of identical times says nothing about
-// which change came first.
+// logbookFormat keeps seconds, because a busy sensor can produce many changes
+// within one minute and identical times hide the order.
 const logbookFormat = "2006-01-02 15:04:05"
 
 // table writes space-aligned columns, truncating each cell to its width so one
-// long value cannot stretch the whole table. A width of 0 means no limit.
+// long value cannot stretch the whole table. Width 0 means no limit.
 func table(w io.Writer, headers []string, widths []int, rows [][]string) error {
 	var buf strings.Builder
 	tw := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
@@ -319,8 +295,7 @@ func table(w io.Writer, headers []string, widths []int, rows [][]string) error {
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	// tabwriter pads the final column even when it is empty, so strip trailing
-	// spaces to keep copied and piped output clean.
+	// tabwriter pads even an empty last column; trim it for clean piped output.
 	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
 		if _, err := fmt.Fprintln(w, strings.TrimRight(line, " \t")); err != nil {
 			return err
@@ -341,8 +316,7 @@ func fit(cells []string, widths []int) []string {
 	return out
 }
 
-// truncate shortens s to at most n characters, marking the cut with an ellipsis.
-// Counts runes rather than bytes so multi-byte names are never split in half.
+// truncate shortens s to at most n runes, marking the cut with an ellipsis.
 func truncate(s string, n int) string {
 	if n <= 0 {
 		return s
@@ -357,9 +331,8 @@ func truncate(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// pad makes s exactly n runes wide, truncating or space-padding as needed.
-// This exists because fmt's %-13s pads by bytes, and the ellipsis is three
-// bytes, so every truncated value shifted its column left by two.
+// pad makes s exactly n runes wide. fmt's %-13s pads by bytes, so truncated
+// multi-byte names shifted their column; this never does.
 func pad(s string, n int) string {
 	if n <= 0 {
 		return ""
