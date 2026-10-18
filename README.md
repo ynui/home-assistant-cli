@@ -39,7 +39,7 @@ has call <domain.service> [entity...] [k=v...] [--all] [--dry-run]
 has history <entity...>           # state changes, [--since 7d]
 has logbook [selector...]         # events incl. automations, [--day today]
 has watch [selector...]           # state changes as they happen
-has services [pattern]            # what can be called
+has services [pattern]            # what can be called; one match lists its fields
 has template <jinja>              # render a template (stdin if omitted)
 has ui                            # the interactive client
 has version
@@ -91,6 +91,8 @@ Key bindings:
 | `space` | run main action |
 | `1`-`9` | run that action (menu open) |
 | `f` | pin/unpin favorite |
+| `h` | hide entity (same key unhides) |
+| `H` | list hidden entities |
 | `v` | change grouping: groups, areas, states, flat |
 | `ctrl+d` | entity attributes panel |
 | `alt+↑`/`alt+↓` | move group or favorite |
@@ -101,8 +103,9 @@ Key bindings:
 | `ctrl+c` | quit |
 
 The header shows whether the connection is `live` (WebSocket) or `polling`;
-it reconnects on its own. Saved in `~/.config/has/ui.json`: favorites, group
-order and view. Groups always start folded; `--expand` opens them all.
+it reconnects on its own. Saved in `~/.config/has/ui.json`: favorites, hidden
+entities, group order and view. Hidden entities still turn up in search; `H`
+is the list of them. Groups always start folded; `--expand` opens them all.
 
 ## Development
 

@@ -104,7 +104,9 @@ func TestSelfCheck(t *testing.T) {
 	t.Run("agent brief", func(t *testing.T) {
 		// The brief is the one page an agent may read instead of guessing, so
 		// the invariants it promises must still be the shipped behavior:
-		// call's positional selectors, exact-name writes, field discovery.
+		// call's positional selectors, exact-name writes, field discovery, and
+		// the two things an agent invents instead of checking (scenes and
+		// parsing error text).
 		out := captureStdout(t, func() {
 			cmdAgent()
 		})
@@ -113,6 +115,9 @@ func TestSelfCheck(t *testing.T) {
 			"\"Dresser Lamp\"",
 			"--dry-run",
 			"has services <domain.service> -o json",
+			"has call scene.turn_on entity_id=evening",
+			"verbatim",
+			"when, entity_id, name, from, to",
 			"Exit codes:",
 		} {
 			if !strings.Contains(out, want) {
@@ -1200,10 +1205,11 @@ func TestWatchPrintsChanges(t *testing.T) {
 	const (
 		turnedOn = `{"entity_id":"light.kitchen_light",` +
 			`"old_state":{"entity_id":"light.kitchen_light","state":"off","last_changed":"2026-10-17T09:00:00Z"},` +
-			`"new_state":{"entity_id":"light.kitchen_light","state":"on","last_updated":"2026-10-17T09:00:01Z"}}`
+			`"new_state":{"entity_id":"light.kitchen_light","state":"on","last_updated":"2026-10-17T09:00:01Z",` +
+			`"attributes":{"friendly_name":"Kitchen Light"}}}`
 		garage = `{"entity_id":"light.garage_light",` +
-			`"old_state":{"entity_id":"light.garage_light","state":"on","last_changed":"2026-10-17T09:01:00Z"},` +
-			`"new_state":null}`
+			`"old_state":{"entity_id":"light.garage_light","state":"on","last_changed":"2026-10-17T09:01:00Z",` +
+			`"attributes":{"friendly_name":"Garage Light"}},"new_state":null}`
 	)
 	out := captureStdout(t, func() {
 		print := watchPrinter(map[string]bool{"light.kitchen_light": true})
@@ -1222,8 +1228,13 @@ func TestWatchPrintsChanges(t *testing.T) {
 	if !strings.Contains(lines[1], timestampSec(changed)) {
 		t.Errorf("line = %q, want the server's own timestamp", lines[1])
 	}
+	// The name comes out of the event, so the reader does not have to translate
+	// an id with `has list` to know what moved.
 	if !strings.Contains(lines[1], "light.kitchen_light") || !strings.Contains(lines[1], "off → on") {
 		t.Errorf("line = %q, want the entity and its transition", lines[1])
+	}
+	if !strings.Contains(lines[1], "Kitchen Light") {
+		t.Errorf("line = %q, want the friendly name from the event", lines[1])
 	}
 	if strings.Contains(out, "garage") {
 		t.Errorf("an entity outside the filter was printed: %q", out)

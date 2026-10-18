@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -159,6 +160,174 @@ func TestUIFilterFindsHidden(t *testing.T) {
 	if got := entityRows(m); len(got) != 1 || got[0] != "sun.sun" {
 		t.Errorf("filtering should reach hidden entities, got %v", got)
 	}
+}
+
+// Hiding (h) is the other "hidden": a saved preference that takes an entity
+// out of the list, the same key brings it back, and H lists what is gone
+// alone. Search reaches h-hidden rows too; the marker tells them apart from
+// the rest.
+func TestUIHideUnhide(t *testing.T) {
+	t.Setenv("HAS_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+
+	m := uiFixture()
+	on := func(t *testing.T, m *uiModel, id string) *uiModel {
+		t.Helper()
+		for i, r := range m.rows() {
+			if !r.isGroup && r.entity.EntityID == id {
+				m.cursor = i
+				return m
+			}
+		}
+		t.Fatalf("%s is not in the list", id)
+		return m
+	}
+
+	// h on an entity: out of the list, into ui.json.
+	got, _ := pressRune(on(t, m, "switch.coffee"), 'h')
+	if !slices.Equal(got.cfg.Hidden, []string{"switch.coffee"}) {
+		t.Fatalf("h should hide the highlighted entity, got %v", got.cfg.Hidden)
+	}
+	for _, r := range got.rows() {
+		if r.entity.EntityID == "switch.coffee" {
+			t.Errorf("the hidden entity is still in the list")
+		}
+	}
+	if s := got.status; !strings.Contains(s, "hid switch.coffee") {
+		t.Errorf("status should explain, got %q", s)
+	}
+	onDisk, err := loadUIConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(onDisk.Hidden, []string{"switch.coffee"}) {
+		t.Errorf("not written to ui.json: %v", onDisk.Hidden)
+	}
+
+	// Search still reaches it, and says so on the row.
+	got = typeRunes(got, "coffee")
+	if ids := entityRows(got); !slices.Equal(ids, []string{"switch.coffee"}) {
+		t.Fatalf("search should reach what h hid, got %v", ids)
+	}
+	if view := stripANSI(got.View()); !strings.Contains(view, "(hidden) Coffee") {
+		t.Errorf("the row should say it is hidden, got:\n%s", view)
+	}
+	got.filter, got.searching = "", false
+
+	// H lists only what is hidden, and h there puts it back.
+	got, _ = pressRune(got, 'H')
+	if ids := entityRows(got); !slices.Equal(ids, []string{"switch.coffee"}) {
+		t.Fatalf("H should list what is hidden, got %v", ids)
+	}
+	if !got.expanded("switch") {
+		t.Errorf("groups reveal in the hidden view, or it starts folded and unreadable")
+	}
+	got, _ = pressRune(on(t, got, "switch.coffee"), 'h')
+	if ids := entityRows(got); !slices.Contains(ids, "switch.coffee") {
+		t.Errorf("unhiding should put the entity back in the list, got %v", ids)
+	}
+	onDisk, _ = loadUIConfig()
+	if len(onDisk.Hidden) != 0 {
+		t.Errorf("unhiding should clear ui.json, got %v", onDisk.Hidden)
+	}
+
+	// H with nothing hidden says so; a group header has nothing to hide.
+	empty, _ := pressRune(uiFixture(), 'H')
+	if got := entityRows(empty); len(got) != 0 {
+		t.Errorf("H over an empty hidden list should show nothing, got %v", got)
+	}
+	if s := empty.status; !strings.Contains(s, "nothing hidden") {
+		t.Errorf("status should explain, got %q", s)
+	}
+	header := uiFixture()
+	if !header.rows()[0].isGroup {
+		t.Fatal("fixture should start on a group header")
+	}
+	header.cursor = 0
+	after, _ := pressRune(header, 'h')
+	if len(after.cfg.Hidden) != 0 {
+		t.Errorf("h on a group header hid %v", after.cfg.Hidden)
+	}
+	if s := after.status; !strings.Contains(s, "pick an entity") {
+		t.Errorf("status should refuse, got %q", s)
+	}
+}
+
+// The cursor is held by identity, never by index: hide and unhide reshape the
+// list under the cursor, so each press has to keep its bearings.
+func TestUIHideCursor(t *testing.T) {
+	t.Setenv("HAS_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	on := func(t *testing.T, m *uiModel, id string) *uiModel {
+		t.Helper()
+		for i, r := range m.rows() {
+			if !r.isGroup && r.entity.EntityID == id {
+				m.cursor = i
+				return m
+			}
+		}
+		t.Fatalf("%s is not in the list", id)
+		return m
+	}
+	at := func(t *testing.T, m *uiModel) string {
+		t.Helper()
+		r, ok := m.rowAt(m.cursor)
+		if !ok {
+			return "<none>"
+		}
+		if r.isGroup {
+			return "header:" + r.domain
+		}
+		return r.entity.EntityID
+	}
+	// The fixture reads, top to bottom: light header, garage, kitchen,
+	// kitchen_2, switch header, coffee.
+
+	t.Run("hide the row under the cursor", func(t *testing.T) {
+		m, _ := pressRune(on(t, uiFixture(), "light.kitchen_light"), 'h')
+		// The row that shifted up into the cursor's index takes its place.
+		if got := at(t, m); got != "light.kitchen_light_2" {
+			t.Errorf("cursor should follow the list, got %s", got)
+		}
+	})
+
+	t.Run("hide the last row of the last group", func(t *testing.T) {
+		// Coffee leaves with the switch header behind it; the cursor clamps
+		// onto an entity, not off the end.
+		m, _ := pressRune(on(t, uiFixture(), "switch.coffee"), 'h')
+		if got := at(t, m); got != "light.kitchen_light_2" {
+			t.Errorf("cursor should land on the last entity, got %s", got)
+		}
+	})
+
+	t.Run("unhide one of two, still in the hidden view", func(t *testing.T) {
+		m := uiFixture()
+		m, _ = pressRune(on(t, m, "light.kitchen_light"), 'h')
+		m, _ = pressRune(on(t, m, "light.kitchen_light_2"), 'h')
+		m, _ = pressRune(m, 'H')
+		m, _ = pressRune(m, 'h') // kitchen_light goes back, kitchen_2 stays
+		if !m.showHidden {
+			t.Fatal("a hidden entity is left, the hidden view should stay")
+		}
+		if ids := entityRows(m); !slices.Equal(ids, []string{"light.kitchen_light_2"}) {
+			t.Fatalf("the still-hidden entity should be listed, got %v", ids)
+		}
+		// The cursor holds its bearings inside the still-open hidden view.
+		if got := at(t, m); got != "light.kitchen_light_2" {
+			t.Errorf("cursor should stay in the hidden view, got %s", got)
+		}
+	})
+
+	t.Run("unhide the last one, land in the normal list", func(t *testing.T) {
+		m := uiFixture()
+		m, _ = pressRune(on(t, m, "switch.coffee"), 'h')
+		m, _ = pressRune(m, 'H')
+		m, _ = pressRune(on(t, m, "switch.coffee"), 'h')
+		if m.showHidden {
+			t.Error("the hidden view should empty itself out")
+		}
+		if got := at(t, m); got != "switch.coffee" {
+			t.Errorf("the cursor should hold the unhidden entity, got %s", got)
+		}
+	})
 }
 
 func TestUIFoldToggle(t *testing.T) {

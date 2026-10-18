@@ -39,24 +39,24 @@ const usageText = `has - a small command-line client for Home Assistant
 usage: has [global flags] <command> [args]
 
 commands:
-  version                    print the version
-  login                       connect to Home Assistant and save the config
-  groups                      list entity domains, busiest first
-  areas [selector...]         list areas and the entities in them
-  list [selector...]          list entity states (default table, -o json for attributes)
-  get <entity>                show exactly one entity
-  ui                          interactive browser and toggle (--poll 0 to disable live updates)
-  on <selector...>            turn entities on
-  off <selector...>           turn entities off
-  toggle <selector...>        toggle entities
+  version                print the version
+  login                  connect to Home Assistant and save the config
+  groups                 list entity domains, busiest first
+  areas [selector...]    list areas and the entities in them
+  list [selector...]     list entity states (default table, -o json for attributes)
+  get <entity>           show exactly one entity
+  ui                     interactive browser and toggle (--poll 0 to disable live updates)
+  on <selector...>       turn entities on
+  off <selector...>      turn entities off
+  toggle <selector...>   toggle entities
   call <domain.service> [entity...] [k=v]
-                                 call any service, naming entities in position
-  history <entity...>         show recent state changes
-  logbook [selector...]       what happened today, house-wide or for a selector
-  watch [selector...]         tail state changes as they happen
-  services [pattern]          list callable services
-  template <jinja>            render a template on the server (stdin if omitted)
-  agent                       a usage brief written for AI agents
+                             call any service, naming entities in position
+  history <entity...>    show recent state changes
+  logbook [selector...]  what happened today, house-wide or for a selector
+  watch [selector...]    tail state changes as they happen
+  services [pattern]     list callable services
+  template <jinja>       render a template on the server (stdin if omitted)
+  agent                  a usage brief written for AI agents
 
 A selector is an entity id (light.kitchen), a domain (light, or lights), or a
 fuzzy name (kitchen). Reads accept many matches; writes need --all when a
@@ -109,15 +109,23 @@ Call details: quoted names are one token ("Dresser Lamp"); entities and
 key=value arguments may come in either order. Relative or absolute values the
 service schema advertises work as raw key=value pairs (has call light.turn_on
 light.dresser_lamp brightness_pct=70) — field names come from
-has services <domain.service> -o json, not from folklore. --dry-run first:
+has services <domain.service> -o json, not from folklore (a pattern matching
+exactly one service also prints those fields as a table). --dry-run first:
 it resolves and prints the payload without a POST; the only confirmation a
 write gets back is the resulting states it prints, entity -> state.
 
+A service naming a scene, script or automation takes it in entity_id=,
+because it is not an entity: has call scene.turn_on entity_id=evening. Those
+are Home Assistant's own presets — do not build a local preset file.
+
 Output contract: results on stdout, warnings on stderr; -o json works on
-every command. Exit codes: 0 ok, 1 error, 2 bad command line, 3 selector
-matched nothing or too much, 4 token refused, 5 server unreachable. "has
-watch <selector>" tails events; has needs a Home Assistant URL and long-lived
-token (has login), overridable by --url/--token or HAS_URL/HAS_TOKEN.
+every command. Errors carry Home Assistant's own message verbatim, so there is
+nothing to parse and nothing to translate. "has watch <selector>" tails
+events, one object per line under -o json: when, entity_id, name, from, to.
+Exit codes: 0 ok, 1 error, 2 bad command line, 3 selector matched nothing or
+too much, 4 token refused, 5 server unreachable. has needs a Home Assistant
+URL and long-lived token (has login), overridable by --url/--token or
+HAS_URL/HAS_TOKEN.
 `
 
 // cmdAgent prints the agent brief; a function so tests can capture it.

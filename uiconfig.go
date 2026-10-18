@@ -10,9 +10,8 @@ import (
 )
 
 // uiConfig is ~/.config/has/ui.json: how the UI is arranged, not what it talks
-// to. No secrets. Four preferences, no snapshots: group orders, favorites, and
-// the view. Fold state is not saved (every run starts closed), and there is no
-// hidden list because folding already covers that for a whole domain.
+// to. No secrets, and no snapshots: group orders, favorites, hidden entities
+// and the view. Fold state is not saved (every run starts closed).
 type uiConfig struct {
 	// GroupOrder is the domains top to bottom, all of them (a partial order
 	// makes "move down" mean nothing). Anything not listed sorts below.
@@ -23,6 +22,9 @@ type uiConfig struct {
 	StateOrder []string `json:"state_order,omitempty"`
 	// Favorites is the pinned entity ids, in the order the user wants them.
 	Favorites []string `json:"favorites,omitempty"`
+	// Hidden is what `h` took out of the list. It comes back with `H` or by
+	// searching, so hiding is a preference, never a loss.
+	Hidden []string `json:"hidden,omitempty"`
 	// View persists the grouping view (groups, areas, states, flat).
 	View string `json:"view,omitempty"`
 }
@@ -100,16 +102,33 @@ func (c uiConfig) isFavorite(id string) bool {
 	return slices.Contains(c.Favorites, id)
 }
 
-// toggleFavorite returns a copy with one entity added to, or removed from, the
-// favorites. It copies first so a field added later cannot be dropped.
+// isHidden is the same test for the hidden list.
+func (c uiConfig) isHidden(id string) bool {
+	return slices.Contains(c.Hidden, id)
+}
+
+// toggled returns the list with id removed, or added if it was not there, so
+// one key both hides and unhides.
+func toggled(list []string, id string) []string {
+	out := append([]string(nil), list...)
+	if i := slices.Index(out, id); i >= 0 {
+		return append(out[:i], out[i+1:]...)
+	}
+	return append(out, id)
+}
+
+// toggleFavorite returns a copy of the favorites with one entity added to, or
+// removed from, them. It copies first so a field added later cannot be dropped.
 func (c uiConfig) toggleFavorite(id string) uiConfig {
 	next := c
-	next.Favorites = append([]string(nil), c.Favorites...)
-	if i := slices.Index(next.Favorites, id); i >= 0 {
-		next.Favorites = append(next.Favorites[:i], next.Favorites[i+1:]...)
-	} else {
-		next.Favorites = append(next.Favorites, id)
-	}
+	next.Favorites = toggled(c.Favorites, id)
+	return next
+}
+
+// toggleHidden is the same for the hidden list (the `h` key).
+func (c uiConfig) toggleHidden(id string) uiConfig {
+	next := c
+	next.Hidden = toggled(c.Hidden, id)
 	return next
 }
 

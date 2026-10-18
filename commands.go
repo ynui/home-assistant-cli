@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -700,6 +702,10 @@ func cmdWatch(args []string) error {
 // ids; longer names are truncated.
 const watchEntityWidth = 44
 
+// watchNameWidth matches the NAME column of `has list`, so the two tables read
+// as the same list.
+const watchNameWidth = 28
+
 // watchChange is one state_changed event. The two states are pointers because
 // null is normal data here: new_state is null when the entity was removed,
 // old_state is null on an entity's first state after startup.
@@ -713,6 +719,7 @@ type watchChange struct {
 type watchLine struct {
 	When   time.Time `json:"when"`
 	Entity string    `json:"entity_id"`
+	Name   string    `json:"name,omitempty"`
 	From   string    `json:"from"`
 	To     string    `json:"to"`
 }
@@ -742,13 +749,17 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 		if ch.OldState != nil {
 			line.From = ch.OldState.State
 		}
+		// The name rides along in the event's attributes; a tail that shows ids
+		// only makes the reader run `has list` to translate them.
 		if ch.NewState != nil {
 			line.To = ch.NewState.State
+			line.Name = friendlyName(ch.NewState)
 			// The server's timestamp, not write time: a reconnect can deliver
 			// an old event.
 			line.When = ch.NewState.LastUpdated
 		} else if ch.OldState != nil {
 			line.When = ch.OldState.LastChanged
+			line.Name = friendlyName(ch.OldState)
 		}
 		if line.When.IsZero() {
 			line.When = time.Now()
@@ -764,12 +775,13 @@ func watchPrinter(only map[string]bool) func(eventType string, data json.RawMess
 		if first {
 			first = false
 			fmt.Fprintln(os.Stdout, "  "+pad("WHEN", len(logbookFormat))+"  "+
-				pad("ENTITY", watchEntityWidth)+"  CHANGE")
+				pad("ENTITY", watchEntityWidth)+"  "+pad("NAME", watchNameWidth)+"  CHANGE")
 		}
 		// pad(), not a table: rows arrive one at a time and tabwriter would
 		// never see the next row to align against.
 		fmt.Fprintln(os.Stdout, pad(timestampSec(line.When), len(logbookFormat))+"  "+
-			pad(line.Entity, watchEntityWidth)+"  "+line.From+" → "+line.To)
+			pad(line.Entity, watchEntityWidth)+"  "+
+			pad(line.Name, watchNameWidth)+"  "+line.From+" → "+line.To)
 	}
 }
 
@@ -967,9 +979,48 @@ func cmdServices(args []string) error {
 	for _, s := range out {
 		rows = append(rows, []string{s.Domain, s.Name, strings.Join(s.entityDomains(), ","), s.Description})
 	}
-	return table(os.Stdout,
+	if err := table(os.Stdout,
 		[]string{"DOMAIN", "SERVICE", "TARGETS", "DESCRIPTION"},
 		[]int{16, 26, 20, 50},
+		rows); err != nil {
+		return err
+	}
+	// One match means the question has moved from "which one" to "what does
+	// it take", and the answer is already in the rows above: the schema came
+	// with them. Many matches would put a field list after every row.
+	if len(out) == 1 {
+		return serviceFields(os.Stdout, out[0])
+	}
+	return nil
+}
+
+// serviceFields prints what one service accepts. Home Assistant's registry
+// carries a description, an example and whether the field is required; it does
+// not carry types or ranges, and reading one out of the example would be
+// inventing a schema the server never sent.
+func serviceFields(w io.Writer, s Service) error {
+	if len(s.Fields) == 0 {
+		return nil
+	}
+	// The gap goes here rather than at the call site: a service that takes no
+	// fields printed an empty line after its table.
+	fmt.Fprintln(w)
+	rows := make([][]string, 0, len(s.Fields))
+	// Sorted: the registry is a map, and two runs should print the same lines.
+	for _, name := range slices.Sorted(maps.Keys(s.Fields)) {
+		f := s.Fields[name]
+		required, example := "-", "-"
+		if f.Required {
+			required = "required"
+		}
+		if f.Example != nil {
+			example = fmt.Sprint(f.Example)
+		}
+		rows = append(rows, []string{name, required, example, f.Description})
+	}
+	return table(w,
+		[]string{"FIELD", "REQUIRED", "EXAMPLE", "DESCRIPTION"},
+		[]int{30, 9, 18, 50},
 		rows)
 }
 

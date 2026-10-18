@@ -184,11 +184,19 @@ no longer depends on a `View` having happened first.
   only, debounced via a generation counter so stale replies are dropped.
 - **Every run starts with every group folded.** Fold state is deliberately not
   persisted: a saved snapshot once made the list come back at 387 rows because
-  yesterday ended with everything open. `ui.json` holds `group_order`,
-  `favorites` and `view` — preferences, never a snapshot; `--expand` is the
-  opt-out for a run that wants it open. There is no hide/unhide either — folding
-  a group covers that job for a whole domain, and a hidden row that only a flag
-  could bring back is one more concept.
+  yesterday ended with everything open. `ui.json` holds the three orders
+  (`group_order`, `area_order`, `state_order`), `favorites`, `hidden` and
+  `view` — preferences, never a snapshot; `--expand` is the opt-out for a run
+  that wants it open. Per-entity hiding is the `h`/`H` pair: `h` toggles the
+  highlighted row off the list (and on), `H` lists only what `h` hid, and the
+  hidden view empties itself out — it leaves on the last unhide. It mirrors
+  favorites exactly: `toggled(list, id)` in `uiconfig.go` is the one add-or-
+  remove both share, `toggleFavorite`/`toggleHidden` copy the config and save
+  it at once, and `follow(r)` puts the cursor back by identity. Hiding never
+  makes a row unreachable: search reaches hidden entities (marked), the
+  precedent `TestUIFilterFindsHidden` already pinned for the ^A filter. There
+  is no hide-in-the-menu on purpose: a read-only sensor has no sub-menu, and
+  `space` on a no-action entity must never become a hide.
 - **`uiConfig` methods copy rather than construct.** A `moveGroup` that rebuilt
   the struct field by field used to drop any field added after it (`folded`, then
   `HiddenGroups`) from the file on every reorder. It is gone now — the swap needs
@@ -304,6 +312,13 @@ no longer depends on a `View` having happened first.
 - **`has services` shows the targets it already parsed.** `Service.entityDomains()`
   used to be thrown away; the new TARGETS column is what says whether a service
   can be aimed at an entity at all.
+- **`has services` lists a single match's fields, and only a single match.** The
+  registry already carries description, example and required, so there is no
+  second request to make and no schema file to keep in sync — and no types or
+  ranges to print, because HA does not send any. Many matches would leave the
+  question "which one", and a field list after every row buries the table.
+  Pinned by `TestReadCommandOutput`, which also asserts the many-match table has
+  no FIELD header.
 - **A state the UI patches in must be the whole state.** A service call answers
   with every entity it changed, and a light group is one of them, so
   `actionCmd` picks the entry matching the entity that was acted on — and passes

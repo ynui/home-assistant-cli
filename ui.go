@@ -100,7 +100,11 @@ type uiModel struct {
 	// defaultFolded.
 	folded        map[string]bool
 	defaultFolded bool
-	showAll       bool // ^A: include domains with no actions
+	// showAll records ^A: include domains with no actions.
+	showAll bool
+	// showHidden records H: list only what h hid. Groups reveal in it, like
+	// they do under a filter, or it would start folded and show headers.
+	showHidden bool
 	// view is how entities are grouped: groups, areas, states or flat. A view
 	// toggle, not a filter, so it never changes which entities match.
 	view string
@@ -164,7 +168,8 @@ func cmdUI(args []string) error {
 		wantWS:   *interval > 0,
 		polling:  *interval > 0,
 		// Every run starts with the list closed. ui.json restores preferences
-		// (order, favorites, view), never a snapshot of yesterday's folds.
+		// (order, favorites, hidden, view), never a snapshot of yesterday's
+		// folds.
 		defaultFolded: !*expand,
 	}
 	if *view == "" && cfg.View != "" {
@@ -478,6 +483,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // letter free as filter text.
 var runeKeys = map[rune]func(*uiModel) tea.Cmd{
 	'f': func(m *uiModel) tea.Cmd { m.toggleFavorite(); return m.afterMove() },
+	'h': func(m *uiModel) tea.Cmd { m.toggleHide(); return m.afterMove() },
+	'H': func(m *uiModel) tea.Cmd { m.toggleShowHidden(); return m.afterMove() },
 	'v': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
 	'V': func(m *uiModel) tea.Cmd { m.cycleViewAndSelect(); return m.afterMove() },
 	// An overlay, not a panel, so it closes the details panel.
@@ -923,6 +930,48 @@ func (m *uiModel) toggleFavorite() {
 	m.follow(r)
 }
 
+// toggleHide drops the highlighted entity from the list, or brings it back
+// with the same key. It is a ui.json preference like a favorite: saved at
+// once, and search or H still reaches it.
+func (m *uiModel) toggleHide() {
+	r, ok := m.rowAt(m.cursor)
+	if !ok || r.isGroup {
+		m.setStatus("pick an entity to hide", statusErr)
+		return
+	}
+	id := r.entity.EntityID
+	m.cfg = m.cfg.toggleHidden(id)
+	if err := saveUIConfig(m.cfg); err != nil {
+		m.setStatus("could not save ui.json: "+err.Error(), statusErr)
+		return
+	}
+	if m.cfg.isHidden(id) {
+		m.setStatus(fmt.Sprintf("hid %s · H shows what is hidden", id), statusOK)
+	} else {
+		m.setStatus(fmt.Sprintf("unhid %s", id), statusOK)
+		// The last unhide leaves the hidden view nothing to show for itself.
+		m.showHidden = len(m.cfg.Hidden) > 0
+	}
+	// Hiding removes the row and can remove a whole group with it.
+	m.follow(r)
+}
+
+// toggleShowHidden flips between the normal list and the hidden entities.
+func (m *uiModel) toggleShowHidden() {
+	m.showHidden = !m.showHidden
+	m.resetCursor()
+	if !m.showHidden {
+		m.setStatus("showing everything · H lists what is hidden", statusOK)
+		return
+	}
+	n := len(m.cfg.Hidden)
+	if n == 0 {
+		m.setStatus("nothing hidden · H goes back", statusOK)
+		return
+	}
+	m.setStatus(fmt.Sprintf("%d hidden · h unhides · H goes back", n), statusOK)
+}
+
 // follow puts the cursor back on the row it was on, matched by identity rather
 // than by index: anything that adds or removes rows shifts every index below
 // it. The group is part of the identity - a favorite is a copy, so the same
@@ -1014,7 +1063,8 @@ func (m *uiModel) setStatus(s string, kind statusKind) { m.status, m.kind = s, k
 
 // matched is what the list shows. With no filter that is the entities you can
 // act on, which for a large instance is a fraction of the total. Once you type,
-// the search covers everything.
+// the search covers everything. Hidden entities (h) stay out of both, but H
+// lists them alone: hiding is a preference, never a loss.
 func (m *uiModel) matched() []State {
 	if m.filter != "" {
 		needle := strings.ToLower(m.filter)
@@ -1043,12 +1093,29 @@ func (m *uiModel) matched() []State {
 		}
 		return out
 	}
+	// H: only what h hid. Above the show-all switch, because the classic
+	// thing to hide is a read-only sensor the actionable filter would refuse.
+	if m.showHidden {
+		out := make([]State, 0, len(m.cfg.Hidden))
+		for _, s := range m.states {
+			if m.cfg.isHidden(s.EntityID) {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
 	if m.showAll || !m.reg.usable {
-		return m.states
+		out := make([]State, 0, len(m.states))
+		for _, s := range m.states {
+			if !m.cfg.isHidden(s.EntityID) {
+				out = append(out, s)
+			}
+		}
+		return out
 	}
 	out := make([]State, 0, len(m.states))
 	for _, s := range m.states {
-		if m.reg.controllable(domain(s.EntityID)) {
+		if m.reg.controllable(domain(s.EntityID)) && !m.cfg.isHidden(s.EntityID) {
 			out = append(out, s)
 		}
 	}
@@ -1067,9 +1134,10 @@ func (m *uiModel) isFolded(d string) bool {
 }
 
 // expanded reports whether a group's entities are visible. Filtering always
-// reveals, otherwise searching would show nothing but headers.
+// reveals, otherwise searching would show nothing but headers — and so does
+// the hidden view, which is a list of itself.
 func (m *uiModel) expanded(d string) bool {
-	if m.filter != "" {
+	if m.filter != "" || m.showHidden {
 		return true
 	}
 	return !m.isFolded(d)
@@ -1734,6 +1802,11 @@ func (m *uiModel) line(r row, selected bool) string {
 	if m.cfg.isFavorite(s.EntityID) {
 		name = "★ " + name
 	}
+	// Plain text, not a styled marker: pad() counts ANSI escapes as text, and
+	// the name cell is padded after this.
+	if m.cfg.isHidden(s.EntityID) {
+		name = "(hidden) " + name
+	}
 	// Only the highlighted row advertises its actions, so the list stays calm.
 	hint := ""
 	if selected && len(acts) > 0 {
@@ -1897,6 +1970,8 @@ func (m *uiModel) helpPopup() []string {
 		{"enter", "open action sub-menu (or toggle group)"},
 		{"1-9", "run that action while the sub-menu is open"},
 		{"f", "favorite / pin entity to top"},
+		{"h", "hide entity (same key unhides)"},
+		{"H", "list hidden entities"},
 		{"v", "cycle grouping (groups · areas · states · flat)"},
 		{"^D", "toggle entity attributes panel"},
 		{"↑ / ↓", "navigate entities and groups"},

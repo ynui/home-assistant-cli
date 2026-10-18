@@ -31,9 +31,9 @@ func readServer(t *testing.T) *httptest.Server {
 		case r.URL.Path == "/api/services":
 			io.WriteString(w, `[
 				{"domain":"light","services":{
-					"turn_on":{"description":"Turn on","fields":{},"target":{"entity":[{"domain":["light"]}]}},
-					"turn_off":{"description":"Turn off","fields":{},"target":{"entity":[{"domain":["light"]}]}},
-					"toggle":{"description":"Toggle","fields":{},"target":{"entity":[{"domain":["light"]}]}}}},
+					"turn_on":{"description":"Turn a light on","fields":{"brightness_pct":{"description":"Brightness in %","example":50},"transition":{"description":"Fade to the new state","example":1.2,"required":true}},"target":{"entity":[{"domain":["light"]}]}},
+					"turn_off":{"description":"Turn a light off","fields":{},"target":{"entity":[{"domain":["light"]}]}},
+					"toggle":{"description":"Toggle a light","fields":{},"target":{"entity":[{"domain":["light"]}]}}}},
 				{"domain":"switch","services":{
 					"turn_on":{"description":"Turn on","fields":{},"target":{"entity":[{"domain":["switch"]}]}}}},
 				{"domain":"homeassistant","services":{
@@ -110,7 +110,20 @@ func TestReadCommandOutput(t *testing.T) {
 		{"services", []string{"services"},
 			[]string{"DOMAIN", "SERVICE", "TARGETS", "DESCRIPTION", "homeassistant", "restart",
 				"light", "toggle", "light", "switch", "turn_on", "switch"},
+			// Many matches, so the answer is still "which one" - listing every
+			// service's fields behind its row would bury the table.
+			[]string{"FIELD"}},
+		// One match moves the question to "what does it take", and the schema is
+		// already in hand: the registry carried the fields with the service.
+		{"services for one", []string{"services", "light.turn_on"},
+			[]string{"DOMAIN", "SERVICE", "FIELD", "REQUIRED", "EXAMPLE", "DESCRIPTION",
+				"brightness_pct", "50", "Brightness in %", "transition", "required", "1.2"},
 			nil},
+		// One match with no fields is a table and nothing after it, not a
+		// table and a blank line.
+		{"services for one without fields", []string{"services", "homeassistant.restart"},
+			[]string{"homeassistant", "restart"},
+			[]string{"FIELD", "\n\n"}},
 		{"areas", []string{"areas"},
 			[]string{"AREA", "COUNT", "Kitchen", "2", "Hallway", "1"},
 			nil},
