@@ -370,10 +370,13 @@ no longer depends on a `View` having happened first.
   `demo/demo.tape` points `HAS_CONFIG` at `$(mktemp -d)/config.json`; a bare
   directory makes `configDir()` write `ui.json` one level up, shared with every
   other run.
-- Git repo on `main`. `go vet` is the only linter; CI (`.github/workflows/ci.yml`)
-  is exactly that plus `gofmt -l` and `go test -race` on ubuntu and macos, and
+- Git repo on `main`. `go vet` is the only linter `make` runs; CI
+  (`.github/workflows/ci.yml`) is that plus `gofmt -l`, staticcheck,
+  govulncheck and `go test -race -cover` on ubuntu and macos, and
   `.github/workflows/release.yml` builds the release archives on a `v*` tag and
-  bumps `ynui/homebrew-tap/Formula/home-assistant-cli.rb`. `.gitignore` covers
+  bumps `ynui/homebrew-tap/Formula/home-assistant-cli.rb`. Workflow actions are
+  pinned to commits, and their majors track the runner's Node (node20 is
+  force-run on node24 and going away). `.gitignore` covers
   `bin/` and a stray root binary; `make build` is the only sanctioned way to
   produce one.
 - `has history` takes Go duration units plus `d`/`w` (`7d`, `2w`); plain

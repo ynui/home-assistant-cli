@@ -26,9 +26,13 @@ jobs:
           - { name: windows-amd64, os: ubuntu-latest, goos: windows, goarch: amd64 }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Pinned to commits, not tags: this workflow publishes the release
+      # binaries, and a tag can be moved after the fact. The majors track the
+      # runner's Node: node20 is only being force-run on node24 and is going
+      # away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: go.mod
 
@@ -42,7 +46,7 @@ jobs:
           CGO_ENABLED=0 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o "home-assistant-cli$EXT" .
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: bin-${{ matrix.name }}
           # ${{ env.VERSION }}, not $VERSION: an input is not a shell, and a
@@ -53,7 +57,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
 
@@ -70,7 +74,7 @@ jobs:
           done
           ls -l home-assistant-cli-${{ env.VERSION }}-*
 
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           generate_release_notes: true
           files: home-assistant-cli-${{ env.VERSION }}-*
