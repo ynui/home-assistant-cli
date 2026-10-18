@@ -25,6 +25,23 @@ func resolve(states []State, tokens []string, all bool) ([]State, error) {
 	seen := map[string]bool{}
 	for _, tok := range tokens {
 		matches := match(states, tok)
+		// A write that matches one friendly name exactly is that entity, not
+		// its helper relatives: the select/switch an integration spawns under
+		// it ("Dresser Lamp Power-on behavior") all contain the plain name
+		// they were named after. Reads keep the wide answer — `has list
+		// kitchen` is still everything kitchen-ish — and two exact matches
+		// stay ambiguous.
+		if !all && len(matches) > 1 {
+			var exact []State
+			for _, s := range matches {
+				if strings.EqualFold(friendlyName(&s), tok) {
+					exact = append(exact, s)
+				}
+			}
+			if len(exact) == 1 {
+				matches = exact
+			}
+		}
 		switch {
 		case len(matches) == 0:
 			return nil, coded{exitSelector, fmt.Errorf("no entity matches %q; run `has list` to see everything, or `has groups` for the domains", tok)}

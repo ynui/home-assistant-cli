@@ -101,6 +101,26 @@ func TestSelfCheck(t *testing.T) {
 		}
 	})
 
+	t.Run("agent brief", func(t *testing.T) {
+		// The brief is the one page an agent may read instead of guessing, so
+		// the invariants it promises must still be the shipped behavior:
+		// call's positional selectors, exact-name writes, field discovery.
+		out := captureStdout(t, func() {
+			cmdAgent()
+		})
+		for _, want := range []string{
+			"has call <domain.service> [entity...] [key=value ...]",
+			"\"Dresser Lamp\"",
+			"--dry-run",
+			"has services <domain.service> -o json",
+			"Exit codes:",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("agent brief lacks %q", want)
+			}
+		}
+	})
+
 	t.Run("parseFields", func(t *testing.T) {
 		got, err := parseFields([]string{"entity_id=light.a", "brightness_pct=40"})
 		if err != nil {
@@ -400,6 +420,79 @@ func TestSelfCheck(t *testing.T) {
 			t.Errorf("header is %d wide, columns were not capped: %q", w, lines[0])
 		}
 	})
+}
+
+// --area is a scope, not a selector: tokens resolve first (refusals and
+// blast-radius rules intact), then only entities living in the named area
+// survive. With --all: has on --area living means every entity in the area.
+func TestAreaScopeFilter(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/template":
+			io.WriteString(w, "light.living_lamp\tLiving Room\nlight.dresser_lamp\tLiving Room\n"+
+				"media_player.tv\tLiving Room\nlight.hall_light\tHallway\n")
+		case "/api/states":
+			io.WriteString(w, `[
+				{"entity_id":"light.living_lamp","state":"off","attributes":{"friendly_name":"Living Lamp"}},
+				{"entity_id":"light.dresser_lamp","state":"off","attributes":{"friendly_name":"Dresser Lamp"}},
+				{"entity_id":"media_player.tv","state":"idle","attributes":{"friendly_name":"TV"}},
+				{"entity_id":"light.hall_light","state":"on","attributes":{"friendly_name":"Hall Light"}}]`)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/services") {
+			posts++
+		}
+		io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"url":"`+srv.URL+`","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HAS_CONFIG", cfg)
+
+	// Read intersection: selector "light" plus --area living keeps the two
+	// lamps, not the TV.
+	out := captureStdout(t, func() {
+		if err := cmdList([]string{"light", "--area", "living"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, want := range []string{"light.living_lamp", "light.dresser_lamp"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("lights in the area: %q", out)
+		}
+	}
+	if strings.Contains(out, "media_player.tv") || strings.Contains(out, "light.hall_light") {
+		t.Errorf("--area must scope outside and across domains: %q", out)
+	}
+	// --all without a selector is the area.
+	out = captureStdout(t, func() {
+		if err := cmdList([]string{"--area", "living"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, want := range []string{"light.living_lamp", "light.dresser_lamp", "media_player.tv"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the whole area: %q", out)
+		}
+	}
+	// A write into a scope of three is refused without --all, never guessed.
+	err := cmdCall([]string{"--area", "living"}, "on", "homeassistant", "turn_on")
+	if err == nil || !strings.Contains(err.Error(), "--all") {
+		t.Errorf("multi-entity produce area write must refuse: %v", err)
+	}
+	// ...and with it, a dry run resolves instead and fires no POSTs.
+	n := posts
+	if err := cmdCall([]string{"--area", "living", "--all", "--dry-run"}, "on", "homeassistant", "turn_on"); err != nil {
+		t.Fatal(err)
+	}
+	if posts != n {
+		t.Errorf("dry run must not fire, got %d new posts", posts-n)
+	}
 }
 
 // history takes the same selectors as every other command. It used to forward
@@ -764,6 +857,92 @@ func TestCallDryRun(t *testing.T) {
 	}
 }
 
+// A bare positional argument to `has call` is an entity selector like every
+// other command's: it must resolve to the entity the name matches, in front
+// of or behind the key=value tokens.
+func TestCallPositionalSelector(t *testing.T) {
+	var posts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/states" {
+			io.WriteString(w, `[
+				{"entity_id":"light.kitchen_light","state":"off","attributes":{"friendly_name":"Kitchen Light"}},
+				{"entity_id":"light.kitchen_light_2","state":"off","attributes":{"friendly_name":"Kitchen Light 2"}}]`)
+			return
+		}
+		if r.Method == http.MethodPost {
+			posts++
+		}
+		io.WriteString(w, `[]`)
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"url":"`+srv.URL+`","token":"t"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HAS_CONFIG", cfg)
+
+	if posts != 0 {
+		t.Errorf("a dry run must not call the server, got %d posts", posts)
+	}
+	dry := func(args ...string) string {
+		args = append([]string{"light.turn_on"}, args...)
+		return captureStdout(t, func() {
+			if err := cmdCall(append(args, "--dry-run"), "call", "light", "turn_on"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	// Positional selector the AGENTS.md shape, attributes after.
+	if out := dry("kitchen_light", "--all", "brightness=187"); !strings.Contains(out, "light.kitchen_light,light.kitchen_light_2") || !strings.Contains(out, "brightness: 187") {
+		t.Errorf("positional selector: %q", out)
+	}
+	// Attributes first, words out of order, same call.
+	if out := dry("brightness=100", "kitchen_light", "--all"); !strings.Contains(out, "brightness: 100") {
+		t.Errorf("position may not matter for selectors: %q", out)
+	}
+	// Merged with an entity_id already in the payload rather than overwritten.
+	merged := dry("kitchen_light", "--all", "entity_id=kitchen_light_2", "brightness=255")
+	if !strings.Contains(merged, "brightness: 255") || strings.Count(merged, "kitchen_light_2") < 2 {
+		t.Errorf("positional and entity_id= should both name entities: %q", merged)
+	}
+	// An ambiguous bare name is refused like on/off refuses it, not guessed.
+	// An ambiguous bare name is refused like on/off refuses it, not guessed.
+	err := cmdCall([]string{"light.turn_on", "kitchen", "brightness=10"}, "call", "light", "turn_on")
+	if err == nil || !strings.Contains(err.Error(), "--all") {
+		t.Errorf("ambiguous selector should refuse: %v", err)
+	}
+}
+
+// When a write matches one friendly name exactly, the substring relatives it
+// spawned ("Kitchen Light Power-on behavior") must not force the --all dance:
+// the write means the named light, the one entity named after it wins. Reads
+// keep the wide answer.
+func TestExactFriendlyNameWins(t *testing.T) {
+	states := []State{
+		{EntityID: "light.dresser_lamp", Attributes: map[string]any{"friendly_name": "Dresser Lamp"}},
+		{EntityID: "select.dresser_lamp_power_on_behavior", Attributes: map[string]any{"friendly_name": "Dresser Lamp Power-on behavior"}},
+		{EntityID: "switch.dresser_lamp_do_not_disturb", Attributes: map[string]any{"friendly_name": "Dresser Lamp Do not disturb"}},
+	}
+	matched, err := resolve(states, []string{"Dresser Lamp"}, false)
+	if err != nil || len(matched) != 1 || matched[0].EntityID != "light.dresser_lamp" {
+		t.Errorf("an exact friendly name should win for a write: %v %v", matched, err)
+	}
+	// Reads take everything kitchen-ish; nothing here matched one name exactly.
+	wide, err := resolve(states, []string{"dresser"}, true)
+	if err != nil || len(wide) != len(states) {
+		t.Errorf("a read keeps the wide match: %v %v", entityIDs(wide), err)
+	}
+	// Still refused when the exact name is not unique.
+	states = append(states,
+		State{EntityID: "light.living_lamp", Attributes: map[string]any{"friendly_name": "Dresser Lamp"}},
+	)
+	if _, err := resolve(states, []string{"Dresser Lamp"}, false); err == nil {
+		t.Error("a duplicated exact name stays ambiguous")
+	}
+}
+
 // list --brief is the shape to ask for when the attributes are not the question:
 // on a real instance they are half the payload, and every row carries two
 // timestamps nobody asked for.
@@ -875,12 +1054,15 @@ func TestAreasSelectsByAreaName(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/template":
-			io.WriteString(w, "light.kitchen_light\tKitchen\nswitch.coffee\tKitchen\nlock.front_door\tHallway\n")
+			io.WriteString(w, "light.kitchen_light\tKitchen\nswitch.coffee\tKitchen\nlock.front_door\tHallway\n"+
+				"light.dresser_lamp\tLiving Room\nlight.living_lamp\tLiving Room\n")
 		case "/api/states":
 			io.WriteString(w, `[
 				{"entity_id":"light.kitchen_light","state":"off"},
 				{"entity_id":"switch.coffee","state":"off"},
 				{"entity_id":"lock.front_door","state":"locked"},
+				{"entity_id":"light.dresser_lamp","state":"off"},
+				{"entity_id":"light.living_lamp","state":"on"},
 				{"entity_id":"sensor.no_area","state":"42"}]`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -902,16 +1084,29 @@ func TestAreasSelectsByAreaName(t *testing.T) {
 		})
 	}
 	all := strings.Split(strings.TrimRight(run(), "\n"), "\n")
-	if len(all) != 3 { // header + Kitchen(2) + Hallway(1); the sensor has no area
+	if len(all) != 4 { // header + Kitchen(2) + Living Room(2) + Hallway(1); the sensor has no area
 		t.Fatalf("got %d lines: %q", len(all), run())
 	}
 	if !strings.Contains(all[1], "Kitchen") || !strings.Contains(all[1], "2") {
-		t.Errorf("busiest area first with its count: %q", all[1])
+		t.Errorf("busiest areas first with their counts: %q", all[1])
 	}
 	// By area name, not by entity name: nothing here is called "kitchen".
 	one := strings.Split(strings.TrimRight(run("kitchen"), "\n"), "\n")
 	if len(one) != 2 || !strings.Contains(one[1], "Kitchen") {
-		t.Errorf("`areas kitchen` = %q", run("kitchen"))
+		t.Errorf("`areas kitchen` = %q", one)
+	}
+	// ...and a token that also matches entity names still means the whole
+	// area: "living" names one entity by substring but the area holds two,
+	// and the dresser lamp shares none of the token.
+	t.Cleanup(func() { *flagOutput = "table" })
+	*flagOutput = "json"
+	js := captureStdout(t, func() {
+		if err := cmdAreas([]string{"living", "-o", "json"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(js, "light.dresser_lamp") || !strings.Contains(js, "light.living_lamp") {
+		t.Errorf("`areas living` answered %q, not the whole area", js)
 	}
 	// And an entity selector still works, resolving the usual way.
 	if got := run("lock"); !strings.Contains(got, "Hallway") {

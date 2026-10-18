@@ -49,12 +49,14 @@ commands:
   on <selector...>            turn entities on
   off <selector...>           turn entities off
   toggle <selector...>        toggle entities
-  call <domain.service> [k=v]  call any service with optional arguments
+  call <domain.service> [entity...] [k=v]
+                                 call any service, naming entities in position
   history <entity...>         show recent state changes
   logbook [selector...]       what happened today, house-wide or for a selector
   watch [selector...]         tail state changes as they happen
   services [pattern]          list callable services
   template <jinja>            render a template on the server (stdin if omitted)
+  agent                       a usage brief written for AI agents
 
 A selector is an entity id (light.kitchen), a domain (light, or lights), or a
 fuzzy name (kitchen). Reads accept many matches; writes need --all when a
@@ -73,6 +75,55 @@ much, 4 the token was refused, 5 the server could not be reached.
 config lives in ~/.config/has/config.json. HAS_URL, HAS_TOKEN and HAS_CONFIG
 override it; --url and --token override those.
 `
+
+// agentText is `has agent`: a one-page brief for AI agents, who read the help
+// once or not at all and then guess. It carries only the invariants — the
+// things that make a wrong guess a wrong call — not a feature tour.
+const agentText = `has: command-line client for Home Assistant — notes for AI agents
+
+Select final answers from real output; run, don't guess:
+  has groups                  # domains, busiest first
+  has list <selector>         # entity/id/name matches; -o json for attributes
+  has areas <area>            # entities in an area (name or partial, e.g. living)
+  has get <entity>            # one entity's full attributes
+  has services [pattern] -o json   # callable services; .fields = argument names
+  has template '<jinja>'      # anything /api/template can answer
+
+Selectors: an exact entity id (light.dresser_lamp), a domain (light, or
+lights), or a substring of id or friendly name (dresser, "Dresser Lamp").
+Reads accept many matches. Writes act on the match: a selector naming one
+friendly name exactly means that entity even if helpers ("Dresser Lamp
+Power-on behavior") share the substring; otherwise a write refuses and lists
+candidates — name one exactly or pass --all, never guess.
+
+Enacting a change:
+  has on/off/toggle <selector...> [--all] [--dry-run]
+  has call <domain.service> [entity...] [key=value ...] [--all] [--dry-run]
+
+--area <name> scopes any selector-taking command to an area, by name or part
+of one (has list --area living light, has on --area living --all). Resolve
+still runs first, so a write refusing more than one entity without --all is
+intact: --area is opt-in, never a silent blast radius.
+
+Call details: quoted names are one token ("Dresser Lamp"); entities and
+key=value arguments may come in either order. Relative or absolute values the
+service schema advertises work as raw key=value pairs (has call light.turn_on
+light.dresser_lamp brightness_pct=70) — field names come from
+has services <domain.service> -o json, not from folklore. --dry-run first:
+it resolves and prints the payload without a POST; the only confirmation a
+write gets back is the resulting states it prints, entity -> state.
+
+Output contract: results on stdout, warnings on stderr; -o json works on
+every command. Exit codes: 0 ok, 1 error, 2 bad command line, 3 selector
+matched nothing or too much, 4 token refused, 5 server unreachable. "has
+watch <selector>" tails events; has needs a Home Assistant URL and long-lived
+token (has login), overridable by --url/--token or HAS_URL/HAS_TOKEN.
+`
+
+// cmdAgent prints the agent brief; a function so tests can capture it.
+func cmdAgent() {
+	fmt.Print(agentText)
+}
 
 func main() {
 	stop := onInterrupt()
@@ -131,6 +182,9 @@ func main() {
 		err = cmdServices(rest)
 	case "template":
 		err = cmdTemplate(rest)
+	case "agent":
+		cmdAgent()
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		flag.Usage()

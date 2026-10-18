@@ -32,10 +32,10 @@ It asks for the URL and token, checks they work, and saves them to
 
 ```
 has groups                        # domains and how many entities each has
-has list [selector...]            # [--sort entity|name|state|changed]
+has list [selector...]            # [--sort entity|name|state|changed] [--area name]
 has get <entity>                  # one entity, with attributes
-has on|off|toggle <selector...>   # [--all] [--dry-run]
-has call <domain.service> [k=v...] [--all] [--dry-run]
+has on|off|toggle <selector...>   # [--all] [--dry-run] [--area name]
+has call <domain.service> [entity...] [k=v...] [--all] [--dry-run]
 has history <entity...>           # state changes, [--since 7d]
 has logbook [selector...]         # events incl. automations, [--day today]
 has watch [selector...]           # state changes as they happen
@@ -59,6 +59,15 @@ has list kitchen               # anything with "kitchen" in id or name
 
 Reads accept many matches. Writes refuse more than one unless you pass
 `--all`; `--dry-run` shows what would be affected without calling.
+
+`has call` names entities in position, mixed with key=value arguments in
+either order:
+
+```sh
+has call light.turn_on "Living Room Lamp" brightness=255
+has call light.turn_on brightness_step_pct=10 "Living Room Lamp"  # brighter
+has on --area living --all light    # every light in an area, all at once
+```
 
 ## Scripting
 

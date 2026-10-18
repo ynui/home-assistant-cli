@@ -107,6 +107,7 @@ func cmdList(args []string) error {
 	reverse := fs.Bool("reverse", false, "reverse the sort order")
 	limit := fs.Int("limit", 0, "show at most this many entities, 0 for all")
 	brief := fs.Bool("brief", false, "with -o json, emit only entity_id, name and state (the table's columns)")
+	area := fs.String("area", "", "restrict to entities whose area matches")
 	tokens, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -115,14 +116,8 @@ func cmdList(args []string) error {
 	if err != nil {
 		return err
 	}
-	states, err := c.states()
+	matched, err := scopedMatch(c, *area, tokens, true)
 	if err != nil {
-		return err
-	}
-	var matched []State
-	if len(tokens) == 0 {
-		matched = states
-	} else if matched, err = resolve(states, tokens, true); err != nil {
 		return err
 	}
 
@@ -306,6 +301,62 @@ func friendlyName(s *State) string {
 	return ""
 }
 
+// filterArea narrows states to entities whose area name matches every token.
+// A scope, not a selector: resolution has already answered elsewhere.
+func filterArea(states []State, areas map[string]string, tok string) []State {
+	var kept []State
+	for _, s := range states {
+		if matchAll([]string{areas[s.EntityID]}, []string{tok}) {
+			kept = append(kept, s)
+		}
+	}
+	return kept
+}
+
+// refuseArea applies the write rules to a scope that resolved to n entities:
+// --area is opt-in, so acting on everything it holds stays as explicit as
+// acting on any fuzzy group.
+func refuseArea(n int, area string) error {
+	if n == 0 {
+		return coded{exitSelector, fmt.Errorf("no entity is in an area matching %q; run \"has areas\" to list them", area)}
+	}
+	return coded{exitSelector, fmt.Errorf("area %q contains %d entities; add --all to act on all of them", area, n)}
+}
+
+// scopedMatch resolves selectors and then, when area is set, keeps only the
+// slice that lives in the named area: rest==0 with --area means everything in
+// the area. all is the command's write rule: writes refuse a scope of more
+// than one unless the caller passed --all, reads take everything.
+func scopedMatch(c *Client, area string, tokens []string, all bool) ([]State, error) {
+	states, err := c.states()
+	if err != nil {
+		return nil, err
+	}
+	var matched []State
+	if len(tokens) == 0 {
+		matched = states
+	} else if matched, err = resolve(states, tokens, all); err != nil {
+		return nil, err
+	}
+	if area == "" {
+		return matched, nil
+	}
+	areas, err := c.entityAreas()
+	if err != nil {
+		return nil, err
+	}
+	kept := filterArea(matched, areas, area)
+	if len(kept) != 1 {
+		if !all {
+			return nil, refuseArea(len(kept), area)
+		}
+		if len(kept) == 0 {
+			return nil, refuseArea(0, area)
+		}
+	}
+	return kept, nil
+}
+
 // matchAll reports whether every needle appears in at least one of the fields.
 func matchAll(fields, patterns []string) bool {
 	if len(patterns) == 0 {
@@ -328,12 +379,13 @@ func matchAll(fields, patterns []string) bool {
 
 // ---------------------------------------------------------------- service calls
 
-// cmdCall is both `has call domain.service k=v` and, when name is set, the
-// entity-list form behind on/off/toggle.
+// cmdCall is `has call domain.service [entity...] key=value ...` and, when
+// name is set, the entity-list form behind on/off/toggle.
 func cmdCall(args []string, name, dom, service string) error {
 	fs := newFlagSet(name)
 	all := fs.Bool("all", false, "act on every entity a group or fuzzy name matches")
 	dry := fs.Bool("dry-run", false, "resolve and print what would be called, without calling it")
+	area := fs.String("area", "", "restrict to entities whose area matches")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -346,30 +398,83 @@ func cmdCall(args []string, name, dom, service string) error {
 	var data map[string]any
 	if name == "call" {
 		if len(rest) == 0 {
-			return coded{exitUsage, errors.New("usage: has call <domain.service> [key=value ...]")}
+			return coded{exitUsage, errors.New("usage: has call <domain.service> [entity...] [key=value ...]")}
 		}
 		d, s, ok := strings.Cut(rest[0], ".")
 		if !ok || d == "" || s == "" {
 			return coded{exitUsage, fmt.Errorf("expected domain.service, got %q", rest[0])}
 		}
 		dom, service = d, s
-		data, err = parseFields(rest[1:])
+		// Everything after the service is either key=value or an entity
+		// selector like every other command's: `has call light.turn_on
+		// "Living Room Lamp" brightness=187` names the entities in position
+		// and attributes wherever they fall, so no flag/arg order rule to
+		// learn. k=v tokens stay in the payload.
+		var fields, sels []string
+		for _, a := range rest[1:] {
+			if strings.Contains(a, "=") {
+				fields = append(fields, a)
+			} else {
+				sels = append(sels, a)
+			}
+		}
+		data, err = parseFields(fields)
 		if err != nil {
 			return err
+		}
+		if len(sels) > 0 {
+			states, err := c.states()
+			if err != nil {
+				return err
+			}
+			matched, err := resolve(states, sels, *all)
+			if err != nil {
+				return err
+			}
+			ids := entityIDs(matched)
+			// Merge with an entity_id already in the payload rather than
+			// overwrite it: both spellings may name entities at once.
+			if s, _ := data["entity_id"].(string); s != "" {
+				for _, t := range strings.Split(s, ",") {
+					if t = strings.TrimSpace(t); t != "" {
+						ids = append(ids, t)
+					}
+				}
+			}
+			data["entity_id"] = ids
 		}
 		// An entity_id in the payload is a selector like any other.
 		if err := resolveTargets(c, data, *all); err != nil {
 			return err
 		}
+		// --area scopes what the payload ended up naming. Kept empty, no
+		// named entity lives in the area; refusing cannot fire at anything.
+		if *area != "" {
+			areas, err := c.entityAreas()
+			if err != nil {
+				return err
+			}
+			var kept []string
+			for _, key := range targetKeys {
+				s, _ := data[key].(string)
+				for _, tok := range strings.Split(s, ",") {
+					if tok = strings.TrimSpace(tok); tok != "" &&
+						matchAll([]string{areas[tok]}, []string{*area}) {
+						kept = append(kept, tok)
+					}
+				}
+				delete(data, key)
+			}
+			if len(kept) != 1 && !*all {
+				return refuseArea(len(kept), *area)
+			}
+			data["entity_id"] = strings.Join(kept, ",")
+		}
 	} else {
-		if len(rest) == 0 {
+		if len(rest) == 0 && *area == "" {
 			return coded{exitUsage, fmt.Errorf("usage: has %s <entity...>", name)}
 		}
-		states, err := c.states()
-		if err != nil {
-			return err
-		}
-		matched, err := resolve(states, rest, *all)
+		matched, err := scopedMatch(c, *area, rest, *all)
 		if err != nil {
 			return err
 		}
@@ -470,7 +575,7 @@ func parseFields(args []string) (map[string]any, error) {
 	for _, a := range args {
 		k, v, ok := strings.Cut(a, "=")
 		if !ok || k == "" {
-			return nil, coded{exitUsage, fmt.Errorf("expected key=value, got %q", a)}
+			return nil, coded{exitUsage, fmt.Errorf("expected key=value, got %q — wrap a multi-word entity name in quotes", a)}
 		}
 		out[k] = v
 	}
@@ -483,11 +588,12 @@ func cmdHistory(args []string) error {
 	fs := newFlagSet("history")
 	since := fs.String("since", "24h", "how far back to look, e.g. 30m, 12h, 7d")
 	limit := fs.Int("limit", 50, "maximum number of changes to show, 0 for all")
+	area := fs.String("area", "", "restrict to entities whose area matches")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	if len(rest) == 0 {
+	if len(rest) == 0 && *area == "" {
 		return coded{exitUsage, errors.New("usage: has history <entity...> [--since 24h]")}
 	}
 	d, err := parseSince(*since)
@@ -500,14 +606,10 @@ func cmdHistory(args []string) error {
 	if err != nil {
 		return err
 	}
-	all, err := c.states()
-	if err != nil {
-		return err
-	}
 	// Selectors resolve like every other command. Sending the token verbatim
 	// used to make HA answer with an empty list, so a fuzzy name looked like
 	// an entity that never changed.
-	matched, err := resolve(all, rest, true)
+	matched, err := scopedMatch(c, *area, rest, true)
 	if err != nil {
 		return err
 	}
@@ -546,6 +648,7 @@ func cmdHistory(args []string) error {
 // connection is an error.
 func cmdWatch(args []string) error {
 	fs := newFlagSet("watch")
+	area := fs.String("area", "", "tail only entities whose area matches")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -555,16 +658,12 @@ func cmdWatch(args []string) error {
 		return err
 	}
 	var only map[string]bool
-	if len(rest) > 0 {
-		all, err := c.states()
-		if err != nil {
-			return err
-		}
-		matched, err := resolve(all, rest, true)
-		if err != nil {
-			return err
-		}
+	if len(rest) > 0 || *area != "" {
 		// Resolved once, up front; never re-resolved per event.
+		matched, err := scopedMatch(c, *area, rest, true)
+		if err != nil {
+			return err
+		}
 		only = map[string]bool{}
 		for _, id := range entityIDs(matched) {
 			only[id] = true
@@ -702,17 +801,22 @@ func cmdAreas(args []string) error {
 	case 0:
 		matched = all
 	default:
-		matched, err = resolve(all, rest, true)
-		if err != nil {
-			// A token that names no entity may name an area instead;
-			// `has areas kitchen` should mean the kitchen.
-			for _, s := range all {
-				if a := areas[s.EntityID]; a != "" && matchAll([]string{a}, rest) {
-					matched = append(matched, s)
-				}
+		// When the args name an area, that reading wins: `has areas living`
+		// is the whole Living Room, including entities whose names share
+		// none of the token — the dresser lamp is not "living"-named, and a
+		// token that also matches six living_room entities must not shadow
+		// the area it names. Only when no area matches do the entity
+		// selectors decide, as before.
+		for _, s := range all {
+			if a := areas[s.EntityID]; a != "" && matchAll([]string{a}, rest) {
+				matched = append(matched, s)
 			}
-			if len(matched) == 0 {
-				return err
+		}
+		if len(matched) == 0 {
+			var rerr error
+			matched, rerr = resolve(all, rest, true)
+			if rerr != nil {
+				return rerr
 			}
 		}
 	}
@@ -763,6 +867,7 @@ func cmdLogbook(args []string) error {
 	fs := newFlagSet("logbook")
 	day := fs.String("day", "today", "which day: today, yesterday or YYYY-MM-DD")
 	limit := fs.Int("limit", 50, "maximum number of entries to show, 0 for all")
+	area := fs.String("area", "", "restrict to entities whose area matches")
 	rest, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -775,14 +880,12 @@ func cmdLogbook(args []string) error {
 	if err != nil {
 		return err
 	}
-	// Selectors resolve like every other command.
+	// Selectors resolve like every other command; --area scopes them. With
+	// --area and no selector, the snapshot itself is scoped to the area
+	// instead of the whole house.
 	var targets []string
-	if len(rest) > 0 {
-		states, err := c.states()
-		if err != nil {
-			return err
-		}
-		matched, err := resolve(states, rest, true)
+	if len(rest) > 0 || *area != "" {
+		matched, err := scopedMatch(c, *area, rest, true)
 		if err != nil {
 			return err
 		}
