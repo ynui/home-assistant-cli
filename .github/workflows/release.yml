@@ -72,7 +72,11 @@ jobs:
               tar -czf "home-assistant-cli-$VERSION-$arch.tar.gz" -C "$dir" "$file"
             fi
           done
-          ls -l home-assistant-cli-${{ env.VERSION }}-*
+          # The shell expands the glob before the redirect creates the output,
+          # so the checksums file does not list itself. Named with the release
+          # prefix so the same glob below uploads it with the archives.
+          sha256sum home-assistant-cli-$VERSION-* > "home-assistant-cli-$VERSION-checksums.txt"
+          cat home-assistant-cli-$VERSION-checksums.txt
 
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:

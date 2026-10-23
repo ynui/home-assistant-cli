@@ -38,7 +38,7 @@ worth caching?" with numbers rather than argument.
 **`TestMain` points `HAS_CONFIG` at a temp directory for the whole package, and
 that is load-bearing.** The UI writes `ui.json` when you pin, reorder or switch
 view, and all three are reachable from a plain `m.Update(...)`, so a test that
-forgets to redirect the config writes to the real `~/.config/has/ui.json` — and
+forgets to redirect the config writes to the real `~/.config/home-assistant-cli/ui.json` — and
 a zero-valued `uiConfig` replaces the user's favorites and group order with
 `{"view": "..."}`. That happened, on every run, to the house this was written
 against. A test that wants its own path sets `HAS_CONFIG` with `t.Setenv`; do not
@@ -173,8 +173,9 @@ no longer depends on a `View` having happened first.
   `controlVerbs`, and it needs no required arguments. HA spells these
   inconsistently (`cover.open_cover` vs `lock.open`), so the verb list is
   explicit. Adding a domain's action means adding its verb there.
-- **`configDir()` is `~/.config/has`, deliberately not `os.UserConfigDir()`**,
-  which would land in `~/Library/Application Support` on macOS.
+- **`configDir()` is `~/.config/home-assistant-cli`, deliberately not
+  `os.UserConfigDir()`**, which would land in `~/Library/Application Support` on
+  macOS.
 - **File modes**: `config.json` is `0600` in a `0700` dir and holds a bearer
   token; `saveConfig` calls `Chmod` explicitly because `WriteFile` only applies
   the mode on creation. `ui.json` is `0644` (no secrets).
@@ -256,8 +257,9 @@ no longer depends on a `View` having happened first.
 - **Search is modal (`/`).** Typing does nothing outside of search mode; `/`
   opens it, even a bare `/` press clears it, and `esc` and `enter` leave it.
   This supersedes the old "every letter is filter text" rule: letters are
-  filter text now, but only inside a search. Space runs the primary action
-  everywhere else and is free to be typed inside a search at the same time.
+  filter text now, but only inside a search. Space folds the highlighted group
+  (or expands it), runs the primary action on an entity, and is free to be typed
+  inside a search at the same time.
 - **The sub-menu owns the keyboard while it is open.** `handleKey` returns early
   for anything `menuKey` does not consume, so a printable never reaches the
   filter and a keystroke cannot move the cursor out from under an action being
@@ -359,7 +361,7 @@ no longer depends on a `View` having happened first.
   `HAS_URL`/`HAS_TOKEN` override values. Precedence: flags > env > file.
 - **The binary is `home-assistant-cli`; `has` is the alias next to it** (a
   symlink from `make install`, from the brew formula, and the name the program
-  uses for itself in `usageText`, its error prefix and `~/.config/has`). The
+  uses for itself in `usageText`, its error prefix and `~/.config/home-assistant-cli`). The
   module is `github.com/ynui/home-assistant-cli`.
 - **`demo/fakeha` is a canned Home Assistant**, not part of the client: it is
   the second `package main` and exists so the README gif can be re-recorded

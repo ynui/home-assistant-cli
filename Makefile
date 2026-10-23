@@ -84,7 +84,7 @@ run: build
 
 # Records demo/demo.gif. Needs vhs, plus ttyd and ffmpeg under it.
 # The tape talks to demo/fakeha - a canned Home Assistant - so no real house and
-# no real ~/.config/has are involved.
+# no real ~/.config/home-assistant-cli are involved.
 demo: build
 	go build -o $(DIR)/fakeha ./demo/fakeha
 	vhs demo/demo.tape

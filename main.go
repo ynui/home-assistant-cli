@@ -72,8 +72,8 @@ template rendered.
 exit codes: 1 error, 2 bad command line, 3 a selector matched nothing or too
 much, 4 the token was refused, 5 the server could not be reached.
 
-config lives in ~/.config/has/config.json. HAS_URL, HAS_TOKEN and HAS_CONFIG
-override it; --url and --token override those.
+HAS_URL, HAS_TOKEN and HAS_CONFIG override the saved config; --url and --token
+override those.
 `
 
 // agentText is `has agent`: a one-page brief for AI agents, who read the help

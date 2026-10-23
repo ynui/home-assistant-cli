@@ -1,7 +1,7 @@
 # Regenerate demo/demo.gif:  make demo   (or: vhs demo/demo.tape from repo root)
 #
 # Runs bin/home-assistant-cli against bin/fakeha - a canned Home Assistant - with
-# a throwaway config, so no real house and no real ~/.config/has are involved.
+# a throwaway config, so no real house and no real ~/.config/home-assistant-cli are involved.
 Output demo/demo.gif
 
 Set Shell zsh

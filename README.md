@@ -13,7 +13,7 @@ brew install ynui/tap/home-assistant-cli
 
 If another tool already owns the `has` name, run `brew unlink has` first.
 Other options: `go install github.com/ynui/home-assistant-cli@latest`,
-`make install` from a checkout, or a binary from the
+`make install` from a checkout, or a binary and its `checksums.txt` from the
 [releases](https://github.com/ynui/home-assistant-cli/releases).
 
 ## Setup
@@ -26,7 +26,7 @@ has login
 ```
 
 It asks for the URL and token, checks they work, and saves them to
-`~/.config/has/config.json`. Run it again to replace a token.
+`~/.config/home-assistant-cli/config.json`. Run it again to replace a token.
 
 ## Commands
 
@@ -103,7 +103,7 @@ Key bindings:
 | `ctrl+c` | quit |
 
 The header shows whether the connection is `live` (WebSocket) or `polling`;
-it reconnects on its own. Saved in `~/.config/has/ui.json`: favorites, hidden
+it reconnects on its own. Saved in `~/.config/home-assistant-cli/ui.json`: favorites, hidden
 entities, group order and view. Hidden entities still turn up in search; `H`
 is the list of them. Groups always start folded; `--expand` opens them all.
 

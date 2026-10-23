@@ -9,7 +9,7 @@ import (
 	"slices"
 )
 
-// uiConfig is ~/.config/has/ui.json: how the UI is arranged, not what it talks
+// uiConfig is ui.json in configDir: how the UI is arranged, not what it talks
 // to. No secrets, and no snapshots: group orders, favorites, hidden entities
 // and the view. Fold state is not saved (every run starts closed).
 type uiConfig struct {

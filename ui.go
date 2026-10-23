@@ -577,12 +577,18 @@ func (m *uiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeySpace:
-		// Filter text inside a search ("living room"), the primary action
-		// outside one; typing only happens in search mode.
+		// Filter text inside a search ("living room"); on a group header it
+		// folds or expands the group, which is the main way through a long
+		// list; on an entity it is the primary action.
 		if m.searching {
 			m.filter += " "
 			m.resetCursor()
 			return m, m.afterMove()
+		}
+		if r, ok := m.rowAt(m.cursor); ok && r.isGroup {
+			m.setFolded(r.domain, !m.isFolded(r.domain))
+			m.keepCursorInRange()
+			return m, nil
 		}
 		return m, m.runAction(0)
 	case tea.KeyEnter:
@@ -1751,7 +1757,7 @@ func (m *uiModel) helpLine() string {
 	if m.help {
 		return "? or esc closes help · ^C quit"
 	}
-	return "? help · / search · space act · v view · enter actions · ^C quit"
+	return "? help · / search · space fold/act · v view · enter actions · ^C quit"
 }
 
 func (m *uiModel) line(r row, selected bool) string {
@@ -1966,7 +1972,7 @@ func (m *uiModel) helpPopup() []string {
 		desc string
 	}{
 		{"/", "search / filter entities"},
-		{"space", "primary action (toggle / turn on)"},
+		{"space", "fold group / primary action (toggle / turn on)"},
 		{"enter", "open action sub-menu (or toggle group)"},
 		{"1-9", "run that action while the sub-menu is open"},
 		{"f", "favorite / pin entity to top"},

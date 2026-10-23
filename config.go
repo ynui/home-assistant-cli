@@ -16,9 +16,9 @@ type Config struct {
 	Token string `json:"token"`
 }
 
-// configDir is ~/.config/has, or the directory of an overridden HAS_CONFIG.
-// Deliberately not os.UserConfigDir(): that lands in ~/Library/Application
-// Support on macOS.
+// configDir is ~/.config/home-assistant-cli, or the directory of an overridden
+// HAS_CONFIG. Deliberately not os.UserConfigDir(): that lands in
+// ~/Library/Application Support on macOS.
 func configDir() (string, error) {
 	if p := os.Getenv("HAS_CONFIG"); p != "" {
 		return filepath.Dir(p), nil
@@ -27,10 +27,10 @@ func configDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "has"), nil
+	return filepath.Join(home, ".config", "home-assistant-cli"), nil
 }
 
-// configPath is ~/.config/has/config.json, overridable with HAS_CONFIG.
+// configPath is config.json inside configDir, overridable with HAS_CONFIG.
 func configPath() (string, error) {
 	dir, err := configDir()
 	if err != nil {

@@ -43,7 +43,10 @@ func cmdLogin(args []string) error {
 
 	// Prompt only for what is still missing; supplied values are not re-asked.
 	if url == "" {
-		url = prompt("Home Assistant URL", "http://homeassistant.local:8123")
+		url, err = prompt("Home Assistant URL", "http://homeassistant.local:8123")
+		if err != nil {
+			return err
+		}
 	}
 	// An existing token is offered as a default, not reused silently:
 	// re-running `has login` is how you replace a revoked token.
@@ -1079,23 +1082,51 @@ func stty(args ...string) error {
 	return cmd.Run()
 }
 
-func prompt(label, def string) string {
+func prompt(label, def string) (string, error) {
 	if def != "" {
 		fmt.Fprintf(os.Stderr, "%s [%s]: ", label, def)
 	} else {
 		fmt.Fprintf(os.Stderr, "%s: ", label)
 	}
-	line, err := stdin.ReadString('\n')
+	line, err := readLine()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil && line == "" {
-		return def // EOF
+		return def, nil // EOF
 	}
 	if !strings.HasSuffix(line, "\n") {
 		fmt.Fprintln(os.Stderr) // keep our prompt on its own line
 	}
 	if line = strings.TrimSpace(line); line == "" {
-		return def
+		return def, nil
 	}
-	return line
+	return line, nil
+}
+
+// readLine reads one line from stdin, but gives up when ^C cancels ctx. A
+// plain ReadString does not see the signal (NotifyContext stops the default
+// exit), so `has login` used to sit at the prompt forever. The read goroutine
+// is abandoned on ^C; the process exits on the error, so it does not leak.
+func readLine() (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ch := make(chan result, 1)
+	// Capture the reader, not the global: the goroutine outlives an
+	// interrupted call, and must not touch a variable a test can swap.
+	r := stdin
+	go func() {
+		line, err := r.ReadString('\n')
+		ch <- result{line, err}
+	}()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case r := <-ch:
+		return r.line, r.err
+	}
 }
 
 // promptSecret reads a line without echoing it (stty; no terminal library).
@@ -1112,8 +1143,11 @@ func promptSecret(label, def string) (string, error) {
 		return "", err
 	}
 	defer restore()
-	line, err := stdin.ReadString('\n')
+	line, err := readLine()
 	fmt.Fprintln(os.Stderr) // the newline we typed is not echoed
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil && line == "" {
 		return def, nil
 	}

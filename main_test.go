@@ -25,7 +25,7 @@ import (
 // The UI writes ui.json — pinning a favorite, reordering a group, switching view
 // all save it — and those saves are reachable from a plain `m.Update(...)`. Tests
 // that forgot to redirect the config therefore wrote to the real
-// ~/.config/has/ui.json, and a zero-valued uiConfig replaced the user's
+// ~/.config/home-assistant-cli/ui.json, and a zero-valued uiConfig replaced the user's
 // favorites and group order with `{"view": "..."}` every time the suite ran.
 // Setting it once here means a test that forgets cannot reach the real file;
 // a test that cares sets HAS_CONFIG itself with t.Setenv.
@@ -314,6 +314,28 @@ func TestSelfCheck(t *testing.T) {
 		defer func() { os.Stdin = old }()
 		if isTTY() {
 			t.Error("isTTY() = true for /dev/null, want false")
+		}
+	})
+
+	t.Run("readLineInterrupt", func(t *testing.T) {
+		// A queued read must not keep the prompt alive after ^C cancelled ctx:
+		// the login prompt used to be unkillable.
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldStdin, oldCtx := stdin, ctx
+		defer func() {
+			stdin, ctx = oldStdin, oldCtx
+			r.Close()
+			w.Close()
+		}()
+		stdin = bufio.NewReader(r)
+		c, cancel := context.WithCancel(context.Background())
+		cancel()
+		ctx = c
+		if _, err := readLine(); !errors.Is(err, context.Canceled) {
+			t.Errorf("readLine err = %v, want context.Canceled", err)
 		}
 	})
 

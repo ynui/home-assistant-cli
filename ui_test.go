@@ -335,8 +335,8 @@ func TestUIFoldToggle(t *testing.T) {
 	if len(entityRows(m)) != 0 {
 		t.Fatal("expected a fully folded start")
 	}
-	// → opens the highlighted group, ← closes it. They are the only keys that
-	// touch one group; tab is for all of them.
+	// → opens the highlighted group, ← closes it. Space does the same, because
+	// folding is the main way through a long list.
 	m, _ = press(m, tea.KeyRight)
 	if len(entityRows(m)) != 3 {
 		t.Errorf("→ should expand the highlighted group, got %v", entityRows(m))
@@ -344,6 +344,14 @@ func TestUIFoldToggle(t *testing.T) {
 	m, _ = press(m, tea.KeyLeft)
 	if len(entityRows(m)) != 0 {
 		t.Errorf("← should collapse again, got %v", entityRows(m))
+	}
+	m, _ = press(m, tea.KeySpace)
+	if len(entityRows(m)) != 3 {
+		t.Errorf("space on a group header should expand it, got %v", entityRows(m))
+	}
+	m, _ = press(m, tea.KeySpace)
+	if len(entityRows(m)) != 0 {
+		t.Errorf("space again should fold it, got %v", entityRows(m))
 	}
 }
 
