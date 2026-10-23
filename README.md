@@ -16,6 +16,17 @@ Other options: `go install github.com/ynui/home-assistant-cli@latest`,
 `make install` from a checkout, or a binary and its `checksums.txt` from the
 [releases](https://github.com/ynui/home-assistant-cli/releases).
 
+Verify a downloaded archive before installing it (put the archive and the
+checksums file in the same directory):
+
+```sh
+sha256sum -c home-assistant-cli-*-checksums.txt --ignore-missing   # Linux
+shasum -a 256 -c home-assistant-cli-*-checksums.txt --ignore-missing  # macOS
+```
+
+`--ignore-missing` lets one checksums file cover all platforms; the archive you
+downloaded must print `OK`.
+
 ## Setup
 
 Get a long-lived access token from your HA profile (open `<url>/profile`),
