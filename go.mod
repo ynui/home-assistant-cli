@@ -1,6 +1,6 @@
 module github.com/ynui/home-assistant-cli
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
